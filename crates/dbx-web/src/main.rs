@@ -8,6 +8,7 @@ mod runtime;
 mod sse;
 mod ssh_prompt;
 mod state;
+mod tenant;
 mod web_mcp;
 
 use std::net::{IpAddr, SocketAddr};
