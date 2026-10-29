@@ -151,8 +151,7 @@ impl TrustConfig {
     }
 
     fn sign(&self, canonical: &str) -> Vec<u8> {
-        let mut mac =
-            <Hmac<Sha256> as Mac>::new_from_slice(&self.key).expect("HMAC 接受任意长度密钥");
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.key).expect("HMAC 接受任意长度密钥");
         mac.update(canonical.as_bytes());
         mac.finalize().into_bytes().to_vec()
     }
@@ -193,19 +192,14 @@ impl TrustConfig {
             .decode(sig.trim())
             .map_err(|_| IdentityError::BadSignature)?;
         // `Mac::verify_slice` 为常量时间比较。
-        let mut mac =
-            <Hmac<Sha256> as Mac>::new_from_slice(&self.key).expect("HMAC 接受任意长度密钥");
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.key).expect("HMAC 接受任意长度密钥");
         mac.update(canonical.as_bytes());
         mac.verify_slice(&provided).map_err(|_| IdentityError::BadSignature)?;
         debug_assert_eq!(expected.len(), provided.len());
 
         self.check_replay(tenant, ts_num, now)?;
 
-        Ok(Identity {
-            tenant: tenant.to_string(),
-            role,
-            acted_as: act_as.map(str::to_string),
-        })
+        Ok(Identity { tenant: tenant.to_string(), role, acted_as: act_as.map(str::to_string) })
     }
 
     fn check_replay(&self, tenant: &str, ts: u64, now: u64) -> Result<(), IdentityError> {
@@ -264,13 +258,8 @@ pub fn now_secs() -> u64 {
 }
 
 /// 仅管理员可访问的接口前缀（相对 `/api`，不含 base path）。
-pub const ADMIN_ONLY_PREFIXES: &[&str] = &[
-    "/mcp",
-    "/system",
-    "/tenants",
-    "/plugins/install-url",
-    "/plugins/marketplace/install",
-];
+pub const ADMIN_ONLY_PREFIXES: &[&str] =
+    &["/mcp", "/system", "/tenants", "/plugins/install-url", "/plugins/marketplace/install"];
 
 /// 判断某个 API 路径是否属于全局配置（非管理员 403）。
 pub fn is_admin_only_path(path: &str) -> bool {
@@ -306,8 +295,12 @@ mod tests {
 
     #[test]
     fn member_cannot_act_as() {
-        let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(config().sign(&TrustConfig::canonical("u-1", Role::Member, "u-2", 1_700_000_000)));
+        let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(config().sign(&TrustConfig::canonical(
+            "u-1",
+            Role::Member,
+            "u-2",
+            1_700_000_000,
+        )));
         let err = config()
             .verify_parts("u-1", "member", Some("u-2"), "1700000000", &sig, 1_700_000_000)
             .expect_err("member 不得代管");
@@ -316,17 +309,24 @@ mod tests {
 
     #[test]
     fn unknown_role_degrades_to_member() {
-        let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(config().sign(&TrustConfig::canonical("u-1", Role::Member, "", 1_700_000_000)));
-        let identity =
-            config().verify_parts("u-1", "root", None, "1700000000", &sig, 1_700_000_000).expect("应通过");
+        let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(config().sign(&TrustConfig::canonical(
+            "u-1",
+            Role::Member,
+            "",
+            1_700_000_000,
+        )));
+        let identity = config().verify_parts("u-1", "root", None, "1700000000", &sig, 1_700_000_000).expect("应通过");
         assert_eq!(identity.role, Role::Member);
     }
 
     #[test]
     fn rejects_expired_timestamp() {
-        let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(config().sign(&TrustConfig::canonical("u-1", Role::Member, "", 1_700_000_000)));
+        let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(config().sign(&TrustConfig::canonical(
+            "u-1",
+            Role::Member,
+            "",
+            1_700_000_000,
+        )));
         let err = config()
             .verify_parts("u-1", "member", None, "1700000000", &sig, 1_700_000_000 + MAX_TS_SKEW_SECS + 1)
             .expect_err("过期应拒绝");
@@ -335,13 +335,15 @@ mod tests {
 
     #[test]
     fn rejects_replay() {
-        let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(config().sign(&TrustConfig::canonical("u-1", Role::Member, "", 1_700_000_000)));
+        let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(config().sign(&TrustConfig::canonical(
+            "u-1",
+            Role::Member,
+            "",
+            1_700_000_000,
+        )));
         let cfg = config();
         cfg.verify_parts("u-1", "member", None, "1700000000", &sig, 1_700_000_000).expect("首次通过");
-        let err = cfg
-            .verify_parts("u-1", "member", None, "1700000000", &sig, 1_700_000_000)
-            .expect_err("重复应拒绝");
+        let err = cfg.verify_parts("u-1", "member", None, "1700000000", &sig, 1_700_000_000).expect_err("重复应拒绝");
         assert!(matches!(err, IdentityError::Replayed));
     }
 
