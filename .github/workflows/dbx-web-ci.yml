@@ -50,14 +50,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libssl-dev libsecret-1-dev libdbus-1-dev pkg-config
 
-      # 只查 bin 目标：--all-targets 会连带编 tests/benches，期间没必要。
-      - name: cargo check (bin only)
-        run: cargo check --locked -p dbx-web --no-default-features --bin dbx-web
-
-      # 以下仅在手动触发并勾选 full 时执行。
+      # 默认只跑当前真正的卡点：cargo test 会连带编译 bin 目标，
+      # 类型错误在这一步就会暴露，不必先跑一次 cargo check。
       - name: cargo test (identity unit tests)
-        if: github.event_name == 'workflow_dispatch' && inputs.full
         run: "cargo test --locked -p dbx-web --no-default-features --bins identity::"
+
+      # 以下仅在手动触发并勾选 full 时执行：全目标编译 + 静态检查。
+      - name: cargo check (all targets)
+        if: github.event_name == 'workflow_dispatch' && inputs.full
+        run: cargo check --locked -p dbx-web --no-default-features --all-targets
 
       - name: clippy
         if: github.event_name == 'workflow_dispatch' && inputs.full
