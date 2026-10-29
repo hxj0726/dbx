@@ -51,8 +51,9 @@ jobs:
       - name: cargo check (no default features)
         run: cargo check --locked -p dbx-web --no-default-features --all-targets
 
+      # dbx-web 是纯 bin crate，没有 lib target；单元测试挂在 [[bin]] 下，用 --bins。
       - name: cargo test (identity + registry unit tests)
-        run: cargo test --locked -p dbx-web --no-default-features --lib
+        run: cargo test --locked -p dbx-web --no-default-features --bins
 
       # 非阻塞：--no-default-features 下大量 feature-gated 代码会报 dead_code，
       # 那不是本次改造引入的问题。先观察，稳定后再收紧为 -D warnings。
