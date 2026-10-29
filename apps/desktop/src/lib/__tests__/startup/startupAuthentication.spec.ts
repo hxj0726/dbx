@@ -27,10 +27,8 @@ describe("startup authentication", () => {
   });
 
   it("ignores an unrecognized role", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ required: false, authenticated: true, role: "root" }) }),
-    );
+    const state = { required: false, authenticated: true, role: "root" };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => state }));
     expect((await checkStartupAuthentication()).role).toBeNull();
   });
 
