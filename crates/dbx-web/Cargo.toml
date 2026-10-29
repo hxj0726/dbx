@@ -43,6 +43,8 @@ async-stream = "0.3"
 futures = "0.3"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 tokio-util = { version = "0.7", features = ["io"] }
+# 请求级租户分发需要 `tower::ServiceExt::oneshot` 把请求投进各租户自己的 Router。
+tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 chrono = "0.4"
 aes-gcm = "0.10"

@@ -4,12 +4,13 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::extract::State;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::identity::{self, Identity, IdentityError, TrustConfig};
 use crate::state::WebState;
 
 #[derive(Deserialize)]
@@ -28,6 +29,9 @@ pub struct AuthCheckResponse {
     pub authenticated: bool,
     pub required: bool,
     pub setup_required: bool,
+    /// 可信代理模式下的角色（admin/member）；None 表示沿用口令会话模式。
+    /// 前端据此对"公共配置"类模块做门禁。
+    pub role: Option<&'static str>,
 }
 
 const MAX_ATTEMPTS: u32 = 5;
@@ -167,18 +171,23 @@ pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
 }
 
 pub async fn check(State(state): State<Arc<WebState>>, req: Request<axum::body::Body>) -> Json<AuthCheckResponse> {
+    let role = req.extensions().get::<Identity>().map(|identity| identity.role.as_str());
+    // 可信代理模式：身份由签名头决定，既不需要口令，也不该提示初始化口令。
+    if role.is_some() {
+        return Json(AuthCheckResponse { authenticated: true, required: false, setup_required: false, role });
+    }
     if state.password_disabled {
-        return Json(AuthCheckResponse { authenticated: true, required: false, setup_required: false });
+        return Json(AuthCheckResponse { authenticated: true, required: false, setup_required: false, role: None });
     }
     let has_password = state.password_hash.read().await.is_some();
     if !has_password {
-        return Json(AuthCheckResponse { authenticated: false, required: false, setup_required: true });
+        return Json(AuthCheckResponse { authenticated: false, required: false, setup_required: true, role: None });
     }
     let authenticated = match extract_session_token(&req) {
         Some(token) => state.sessions.read().await.contains(&token),
         None => false,
     };
-    Json(AuthCheckResponse { authenticated, required: true, setup_required: false })
+    Json(AuthCheckResponse { authenticated, required: true, setup_required: false, role: None })
 }
 
 pub async fn change_password(
@@ -265,11 +274,53 @@ fn extract_session_token<B>(req: &Request<B>) -> Option<String> {
     session_token_from_headers(req.headers())
 }
 
+pub(crate) fn identity_from_headers(trust: &TrustConfig, headers: &HeaderMap) -> Result<Identity, IdentityError> {
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let tenant = header(identity::HEADER_TENANT).ok_or(IdentityError::MissingHeaders)?;
+    let role = header(identity::HEADER_ROLE).ok_or(IdentityError::MissingHeaders)?;
+    let ts = header(identity::HEADER_TS).ok_or(IdentityError::MissingHeaders)?;
+    let sig = header(identity::HEADER_SIG).ok_or(IdentityError::MissingHeaders)?;
+    trust.verify_parts(tenant, role, header(identity::HEADER_ACT_AS), ts, sig, identity::now_secs())
+}
+
+pub(crate) fn identity_error_response(error: IdentityError) -> Response {
+    let status = match &error {
+        IdentityError::NotConfigured => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::UNAUTHORIZED,
+    };
+    (status, error.to_string()).into_response()
+}
+
 pub async fn auth_middleware(
     State(state): State<Arc<WebState>>,
-    req: Request<axum::body::Body>,
+    mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    if let Some(trust) = state.trust.clone() {
+        // 受信任反代模式：身份完全由签名头决定，口令与会话逻辑整体让位。
+        // 这段必须放在下面 `api_suffix` 之前（这里要可变借 req），也必须放在
+        // bootstrap 白名单之前——反代是唯一入口，任何路径都不能免签。
+        let path = req.uri().path().to_string();
+        // 分发器可能已经验过签（见 dispatch.rs），此时直接复用：`verify_parts`
+        // 带重放检测，同一组头验两次第二次会被判成 Replayed。
+        let identity = match req.extensions().get::<Identity>().cloned() {
+            Some(identity) => identity,
+            None => match identity_from_headers(&trust, req.headers()) {
+                Ok(identity) => identity,
+                Err(error) => return identity_error_response(error),
+            },
+        };
+        let suffix = middleware_api_path_suffix(&path, &state.public_base_path);
+        if !identity.role.is_admin() && suffix.is_some_and(identity::is_admin_only_path) {
+            return (StatusCode::FORBIDDEN, "该模块仅管理员可操作").into_response();
+        }
+        if identity.is_acting_as() {
+            trust.audit_act_as(&identity, &path);
+        }
+        req.extensions_mut().insert(identity);
+        return next.run(req).await;
+    }
+
     // Only the bootstrap auth endpoints are reachable without a session —
     // login/setup/check. change-password and logout require one: change-password
     // must not be an unauthenticated password oracle.

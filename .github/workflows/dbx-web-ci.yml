@@ -55,6 +55,11 @@ jobs:
       - name: cargo test (identity unit tests)
         run: "cargo test --locked -p dbx-web --no-default-features --bins identity::"
 
+      # 租户注册表是纯逻辑（对负载类型泛型化，测试用 T = ()），同样不需要
+      # 全量目标即可覆盖：id 校验、容量上限、空闲回收、inflight 保护。
+      - name: cargo test (tenant registry unit tests)
+        run: "cargo test --locked -p dbx-web --no-default-features --bins tenant::"
+
       # 以下仅在手动触发并勾选 full 时执行：全目标编译 + 静态检查。
       - name: cargo check (all targets)
         if: github.event_name == 'workflow_dispatch' && inputs.full
