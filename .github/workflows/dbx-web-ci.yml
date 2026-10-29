@@ -55,7 +55,7 @@ jobs:
       # 只跑本模块用例：--no-default-features 下既有 routes::* 测试会栈溢出
       # （与本次改造无关），全量用例仍由仓库 CI 用默认特性跑。
       - name: cargo test (identity unit tests)
-        run: cargo test --locked -p dbx-web --no-default-features --bins identity::
+        run: "cargo test --locked -p dbx-web --no-default-features --bins identity::"
 
       # 非阻塞：--no-default-features 下大量 feature-gated 代码会报 dead_code，
       # 那不是本次改造引入的问题。先观察，稳定后再收紧为 -D warnings。
