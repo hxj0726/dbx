@@ -150,10 +150,18 @@ impl TrustConfig {
         format!("{tenant}\n{}\n{act_as}\n{ts}", role.as_str())
     }
 
-    fn sign(&self, canonical: &str) -> Vec<u8> {
+    pub(crate) fn sign(&self, canonical: &str) -> Vec<u8> {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.key).expect("HMAC 接受任意长度密钥");
         mac.update(canonical.as_bytes());
         mac.finalize().into_bytes().to_vec()
+    }
+
+    /// 仅供单元测试构造：不读环境变量，也不写审计日志。
+    ///
+    /// 其他模块的测试需要自己签发身份头，而 `key` 是私有的，所以在这里开一个小口子。
+    #[cfg(test)]
+    pub(crate) fn for_test(key: &[u8]) -> Self {
+        Self { key: key.to_vec(), replay: Mutex::new(VecDeque::new()), audit_path: None }
     }
 
     /// 校验一组头（已抽出，便于单测）。

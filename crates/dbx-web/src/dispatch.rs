@@ -97,3 +97,75 @@ pub fn spawn_tenant_reaper(state: Arc<DispatchState>) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::{Role, TrustConfig};
+    use base64::Engine as _;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    const KEY: &str = "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk";
+
+    /// 这几条用例都只覆盖"进入 `get_or_create` 之前"的分支，不会真的装配租户，
+    /// 所以 root 指向一个不存在的目录也没关系。
+    fn state(root: &str) -> Arc<DispatchState> {
+        Arc::new(DispatchState {
+            registry: TenantRegistry::new(PathBuf::from(root), String::new(), 4, Duration::from_secs(60)),
+            trust: Arc::new(TrustConfig::for_test(KEY.as_bytes())),
+        })
+    }
+
+    fn headers(tenant: &str, ts: u64) -> Vec<(String, String)> {
+        let trust = TrustConfig::for_test(KEY.as_bytes());
+        let canonical = TrustConfig::canonical(tenant, Role::Member, "", ts);
+        let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(trust.sign(&canonical));
+        vec![
+            ("x-dbx-tenant".to_string(), tenant.to_string()),
+            ("x-dbx-role".to_string(), "member".to_string()),
+            ("x-dbx-ts".to_string(), ts.to_string()),
+            ("x-dbx-sig".to_string(), sig),
+        ]
+    }
+
+    fn now() -> u64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).expect("系统时间应晚于 1970").as_secs()
+    }
+
+    async fn dispatch_status(root: &str, headers: Vec<(String, String)>) -> StatusCode {
+        let mut request = Request::builder().uri("/api/connection/list");
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        let request = request.body(Body::empty()).expect("请求应可构造");
+        dispatcher_router(state(root)).oneshot(request).await.expect("分发不应失败").status()
+    }
+
+    #[tokio::test]
+    async fn rejects_requests_without_identity_headers() {
+        let status = dispatch_status("/tmp/dbx-dispatch-none", vec![]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn rejects_forged_signatures() {
+        let mut forged = headers("u-1", now());
+        forged[3].1 = "A".repeat(43);
+        let status = dispatch_status("/tmp/dbx-dispatch-forged", forged).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// 签名合法但租户 id 含路径分隔符：必须停在 400，不能拿去拼目录。
+    #[tokio::test]
+    async fn rejects_tenant_ids_that_escape_the_data_root() {
+        let status = dispatch_status("/tmp/dbx-dispatch-escape", headers("../etc", now())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn maps_registry_errors_to_distinct_status_codes() {
+        assert_eq!(registry_error_response(Error::Capacity { cap: 3 }).status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(registry_error_response(Error::InvalidId("x".into())).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(registry_error_response(Error::Build("boom".into())).status(), StatusCode::BAD_GATEWAY);
+    }
+}
