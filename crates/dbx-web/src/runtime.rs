@@ -125,6 +125,13 @@ pub async fn build_tenant(data_dir: PathBuf, public_base_path: String) -> Result
         WebMcpRuntime::disabled()
     });
 
+    // 受信任反代模式（next-tdc 注入签名头）在这里一次性判定：配置非法时启动
+    // 直接失败，而不是等到第一个请求才暴露。
+    let trust = match crate::identity::TrustConfig::from_env(&data_dir) {
+        Ok(trust) => trust.map(Arc::new),
+        Err(error) => return Err(format!("invalid trust proxy configuration: {error}")),
+    };
+
     let web_state = Arc::new(WebState {
         app: app_state,
         data_dir,
@@ -146,6 +153,7 @@ pub async fn build_tenant(data_dir: PathBuf, public_base_path: String) -> Result
         export_files: RwLock::new(HashMap::new()),
         ssh_prompts: Arc::new(SshPromptHub::new()),
         migration_ready: Arc::new(std::sync::atomic::AtomicBool::new(migration_ready)),
+        trust,
         web_mcp,
     });
 

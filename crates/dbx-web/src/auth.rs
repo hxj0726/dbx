@@ -4,12 +4,13 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::extract::State;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::identity::{self, Identity, IdentityError, TrustConfig};
 use crate::state::WebState;
 
 #[derive(Deserialize)]
@@ -265,11 +266,53 @@ fn extract_session_token<B>(req: &Request<B>) -> Option<String> {
     session_token_from_headers(req.headers())
 }
 
+fn identity_from_headers(trust: &TrustConfig, headers: &HeaderMap) -> Result<Identity, IdentityError> {
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let parts = (
+        header(identity::HEADER_TENANT),
+        header(identity::HEADER_ROLE),
+        header(identity::HEADER_TS),
+    );
+    let (Some(tenant), Some(role), Some(ts)) = parts else {
+        return Err(IdentityError::MissingHeaders);
+    };
+    let sig = header(identity::HEADER_SIG).ok_or(IdentityError::MissingHeaders)?;
+    trust.verify_parts(tenant, role, header(identity::HEADER_ACT_AS), ts, sig, identity::now_secs())
+}
+
+fn identity_error_response(error: IdentityError) -> Response {
+    let status = match &error {
+        IdentityError::NotConfigured => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::UNAUTHORIZED,
+    };
+    (status, error.to_string()).into_response()
+}
+
 pub async fn auth_middleware(
     State(state): State<Arc<WebState>>,
-    req: Request<axum::body::Body>,
+    mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    if let Some(trust) = state.trust.clone() {
+        // 受信任反代模式：身份完全由签名头决定，口令与会话逻辑整体让位。
+        // 这段必须放在下面 `api_suffix` 之前（这里要可变借 req），也必须放在
+        // bootstrap 白名单之前——反代是唯一入口，任何路径都不能免签。
+        let path = req.uri().path().to_string();
+        let identity = match identity_from_headers(&trust, req.headers()) {
+            Ok(identity) => identity,
+            Err(error) => return identity_error_response(error),
+        };
+        let suffix = middleware_api_path_suffix(&path, &state.public_base_path);
+        if !identity.role.is_admin() && suffix.is_some_and(identity::is_admin_only_path) {
+            return (StatusCode::FORBIDDEN, "该模块仅管理员可操作").into_response();
+        }
+        if identity.is_acting_as() {
+            trust.audit_act_as(&identity, &path);
+        }
+        req.extensions_mut().insert(identity);
+        return next.run(req).await;
+    }
+
     // Only the bootstrap auth endpoints are reachable without a session —
     // login/setup/check. change-password and logout require one: change-password
     // must not be an unauthenticated password oracle.

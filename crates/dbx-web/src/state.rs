@@ -57,6 +57,8 @@ pub struct WebState {
     pub export_files: RwLock<HashMap<String, WebExportFile>>,
     pub ssh_prompts: Arc<crate::ssh_prompt::SshPromptHub>,
     pub migration_ready: Arc<AtomicBool>,
+    /// 受信任反代（next-tdc）注入的签名身份配置；`None` 表示沿用口令/会话模式。
+    pub trust: Option<Arc<crate::identity::TrustConfig>>,
     pub web_mcp: Arc<crate::web_mcp::WebMcpRuntime>,
 }
 
@@ -89,6 +91,7 @@ impl WebState {
             export_files: RwLock::new(HashMap::new()),
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
             migration_ready: Arc::new(AtomicBool::new(true)),
+            trust: None,
             web_mcp: Arc::new(crate::web_mcp::WebMcpRuntime::disabled()),
         }
     }
