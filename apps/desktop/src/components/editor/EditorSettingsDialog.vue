@@ -377,6 +377,7 @@ import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
+import { useWebIdentityStore } from "@/stores/webIdentityStore";
 import { currentLocale, previewLocale, restoreLocalePreview, setLocale, type Locale } from "@/i18n";
 import {
   AI_CONVERSATION_FONT_FAMILY_DEFAULT,
@@ -3712,6 +3713,7 @@ async function pickCustomSkillRoot() {
 const activeSettingsTab = ref("appearance");
 const settingsContentScrollRef = ref<HTMLElement | null>(null);
 const isWeb = !isTauriRuntime();
+const webIdentity = useWebIdentityStore();
 const appSupportInfo = ref<AppSupportInfo | null>(null);
 const appSupportInfoLoading = ref(false);
 const appSupportInfoError = ref("");
@@ -3759,11 +3761,22 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   { value: "snippets", label: t("settings.snippetsTab") },
   { value: "sync", label: t("settings.syncTab") },
   { value: "ai", label: t("settings.aiTab") },
-  { value: "mcp" as const, label: t("settings.mcpTab") },
+  ...(webIdentity.isAdmin ? [{ value: "mcp" as const, label: t("settings.mcpTab") }] : []),
   { value: "updates" as const, label: t("settings.updatesTab") },
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
   { value: "about", label: t("settings.aboutTab") },
 ]);
+// 普通用户不能进入 MCP 公共配置：它挂在进程级根状态上，改动会影响所有租户。
+// 导航项已按角色隐藏，这里再兜住"设置搜索跳转"和 initialTab 两条入口。
+watch(
+  () => [webIdentity.isAdmin, activeSettingsTab.value] as const,
+  () => {
+    if (!webIdentity.isAdmin && activeSettingsTab.value === "mcp") {
+      activeSettingsTab.value = "appearance";
+    }
+  },
+  { immediate: true },
+);
 const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "shortcuts", "snippets", "updates"]);
 
 function hasSettingsApplyFooter(value: SettingsCategory): boolean {
