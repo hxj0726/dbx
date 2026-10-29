@@ -46,6 +46,10 @@ Environment variables:
   DBX_PORT              Listen port (default: 4224)
   DBX_DATA_DIR          Data directory (default: ~/.dbx-web)
   DBX_PUBLIC_BASE_PATH  URL path prefix (default: /)
+  DBX_TRUST_PROXY       Set to 1 to trust signed identity headers from a reverse proxy
+  DBX_TRUST_KEY         HMAC key for those headers (required with DBX_TRUST_PROXY)
+  DBX_TENANT_CAP        Max resident tenants (default: 64)
+  DBX_TENANT_IDLE_SECS  Idle seconds before a tenant is evicted (default: 1800)
   DBX_PASSWORD          Set the Web login password
   DBX_DISABLE_PASSWORD  Set to 1 to disable login protection
   DBX_STATIC_DIR        Serve frontend assets from this directory
@@ -68,6 +72,10 @@ Environment variables:
   DBX_PORT              Listen port (default: 4224)
   DBX_DATA_DIR          Data directory (default: %HOME%\.dbx-web; .\.dbx-web if HOME is unset)
   DBX_PUBLIC_BASE_PATH  URL path prefix (default: /)
+  DBX_TRUST_PROXY       Set to 1 to trust signed identity headers from a reverse proxy
+  DBX_TRUST_KEY         HMAC key for those headers (required with DBX_TRUST_PROXY)
+  DBX_TENANT_CAP        Max resident tenants (default: 64)
+  DBX_TENANT_IDLE_SECS  Idle seconds before a tenant is evicted (default: 1800)
   DBX_PASSWORD          Set the Web login password
   DBX_DISABLE_PASSWORD  Set to 1 to disable login protection
   DBX_STATIC_DIR        Serve frontend assets from this directory
