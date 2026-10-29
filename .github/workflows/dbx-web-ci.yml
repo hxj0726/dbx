@@ -1,0 +1,61 @@
+name: DBX Web checks
+
+# 多租户化改造（crates/dbx-web）的快速反馈通道。
+# 目标：push 后 10 分钟内拿到 cargo check / 单测结果，不必等完整 release 构建。
+on:
+  push:
+    paths:
+      - "crates/dbx-web/**"
+      - "crates/dbx-core/src/state.rs"
+      - ".github/workflows/dbx-web-ci.yml"
+  pull_request:
+    paths:
+      - "crates/dbx-web/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dbx-web-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check:
+    name: cargo check + test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # dbx-web 默认特性含 duckdb-sidecar（C++ 构建，极慢）。
+      # 校验逻辑层先绕开它；这里只需 WebKit 之外的少量系统库。
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libssl-dev libsecret-1-dev libdbus-1-dev pkg-config
+
+      - name: cargo check (no default features)
+        run: cargo check --locked -p dbx-web --no-default-features --all-targets
+
+      - name: cargo test (identity + registry unit tests)
+        run: cargo test --locked -p dbx-web --no-default-features --lib
+
+      # 非阻塞：--no-default-features 下大量 feature-gated 代码会报 dead_code，
+      # 那不是本次改造引入的问题。先观察，稳定后再收紧为 -D warnings。
+      - name: clippy
+        continue-on-error: true
+        run: cargo clippy --locked -p dbx-web --no-default-features --all-targets

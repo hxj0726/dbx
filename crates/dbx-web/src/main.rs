@@ -1,4 +1,5 @@
 mod auth;
+mod identity;
 mod credentials;
 mod demo;
 mod error;
