@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
-use hmac::{Hmac, Mac};
+use pbkdf2::hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
