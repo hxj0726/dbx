@@ -3763,7 +3763,8 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   { value: "ai", label: t("settings.aiTab") },
   ...(webIdentity.isAdmin ? [{ value: "mcp" as const, label: t("settings.mcpTab") }] : []),
   { value: "updates" as const, label: t("settings.updatesTab") },
-  ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
+  // 可信代理模式下口令不参与鉴权（身份来自签名头），"密码管理"页没有意义，直接隐藏。
+  ...(isWeb && webIdentity.role === null ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
   { value: "about", label: t("settings.aboutTab") },
 ]);
 // 普通用户不能进入 MCP 公共配置：它挂在进程级根状态上，改动会影响所有租户。
