@@ -4,19 +4,16 @@ mod demo;
 mod error;
 mod identity;
 mod routes;
+mod runtime;
 mod sse;
 mod ssh_prompt;
 mod state;
 mod web_mcp;
 
-use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::SaltString;
-use argon2::{Argon2, PasswordHasher};
 use axum::extract::DefaultBodyLimit;
 
 /// Login/setup payloads are one password field; 64 KiB is generous.
@@ -27,18 +24,12 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use dbx_core::connection::AppState;
-use dbx_core::persistence::secret_codec::SecretKeyPolicy;
-use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
-use dbx_core::sql_dialect::hot_reload::DialectHotReload;
-use dbx_core::storage::Storage;
 use dbx_mcp::{streamable_http_router, DbxBackend, LocalBackend};
 use state::WebState;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::RwLock;
+use std::sync::atomic::Ordering;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
 use utoipa::OpenApi;
-use web_mcp::WebMcpRuntime;
 
 const XLSX_CONTENT_TYPE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
@@ -532,109 +523,22 @@ async fn serve() -> Result<(), String> {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         std::path::PathBuf::from(home).join(".dbx-web")
     });
-    std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
-
-    let app_state = {
-        let db_path = data_dir.join("dbx.db");
-        let storage = Storage::open_unmigrated(&db_path)
-            .await
-            .expect("Failed to open storage")
-            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
-
-        // Initialize core dialect registry and load external plugin dialects
-        register_core_dialects();
-        let registry = DialectRegistry::global();
-        let plugin_dirs = vec![data_dir.join("plugins").join("dialects")];
-        let load_result = DialectPluginLoader::scan_and_load(registry, &plugin_dirs);
-        log::info!(
-            "Dialect plugins loaded: {} success, {} errors, {} skipped",
-            load_result.loaded.len(),
-            load_result.errors.len(),
-            load_result.skipped.len()
-        );
-
-        // Start dialect YAML hot-reload watcher
-        let watch_dirs = plugin_dirs.clone();
-        tokio::spawn(async move {
-            if let Err(e) = DialectHotReload::run_forever(watch_dirs, DialectRegistry::global()).await {
-                log::error!("Dialect hot-reload watcher exited: {e}");
-            }
-        });
-        log::info!("Dialect hot-reload watcher started");
-
-        Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
-            storage,
-            data_dir.join("plugins"),
-            web_agent_dir(&data_dir),
-            env!("CARGO_PKG_VERSION"),
-        ))
-    };
-
-    app_state.set_honor_fixed_ssh_local_ports(true);
-
-    // Password hash: env var takes priority, then database
-    let password_disabled = std::env::var("DBX_DISABLE_PASSWORD")
-        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
-    let password_viewer_enabled =
-        password_viewer_enabled_from_env(std::env::var("DBX_DISABLE_PASSWORD_VIEWER").ok().as_deref());
-
-    let password_hash = if password_disabled {
-        None
-    } else if let Ok(pw) = std::env::var("DBX_PASSWORD") {
-        let salt = SaltString::generate(&mut OsRng);
-        Some(Argon2::default().hash_password(pw.as_bytes(), &salt).expect("Failed to hash password").to_string())
-    } else {
-        app_state.storage.load_password_hash().await.unwrap_or(None)
-    };
 
     let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
 
-    let demo_mode = demo::demo_mode_from_env();
+    // Everything from the data directory down is tenant-scoped and lives in
+    // `runtime::build_tenant`; only the process-wide initialisation above
+    // belongs to `serve()`.
+    let tenant = runtime::build_tenant(data_dir, public_base_path.clone()).await?;
+    let web_state = tenant.state;
+    let backup_stop = tenant.backup_stop;
+    let backup_worker = tenant.backup_worker;
 
-    let migration_ready = storage_migration_ready(&app_state).await;
-    let web_mcp = Arc::new(if migration_ready {
-        WebMcpRuntime::load(&app_state.storage, !password_disabled && password_hash.is_some())
-            .await
-            .map_err(web_mcp_startup_error)?
-    } else {
-        WebMcpRuntime::disabled()
-    });
-    let web_state = Arc::new(WebState {
-        app: app_state,
-        data_dir,
-        notes_roots: routes::docs::notes_roots_from_env(std::env::var_os("DBX_DOCS_NOTES_ROOTS").as_deref()),
-        public_base_path: public_base_path.clone(),
-        demo_mode,
-        password_disabled,
-        password_viewer_enabled,
-        password_hash: RwLock::new(password_hash),
-        sessions: RwLock::new(HashSet::new()),
-        sse_channels: RwLock::new(HashMap::new()),
-        transfer_progress_channels: RwLock::new(HashMap::new()),
-        table_import_channels: RwLock::new(HashMap::new()),
-        sql_file_executions: RwLock::new(HashMap::new()),
-        sql_file_failure_logs: Default::default(),
-        managed_sql_previews: Default::default(),
-        nacos_imports: RwLock::new(HashMap::new()),
-        login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
-        export_files: RwLock::new(HashMap::new()),
-        ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
-        migration_ready: Arc::new(AtomicBool::new(migration_ready)),
-        web_mcp,
-    });
-
+    // The SSH prompt gateway is a process-global singleton: installing it per
+    // tenant would have each call clobber the previous one. It stays here at
+    // the process level so the eventual multi-tenant dispatcher has a single
+    // install point and can deliver prompts by connection owner.
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
-    routes::sql_file::start_sql_file_cleanup(&web_state);
-    routes::connection::start_connection_idle_sweeper(&web_state);
-
-    let backup_root = std::env::var_os("DBX_BACKUP_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| web_state.data_dir.join("backups"));
-    std::fs::create_dir_all(&backup_root).expect("Failed to create server backup root");
-    let backup_service = routes::scheduled_backup::service(&web_state).expect("Failed to resolve server backup root");
-    let backup_stop = tokio_util::sync::CancellationToken::new();
-    let backup_worker = backup_service.start(backup_stop.clone());
 
     // API routes
     let api = Router::new()
@@ -1632,15 +1536,15 @@ async fn serve() -> Result<(), String> {
     if public_base_path != "/" {
         tracing::info!("Serving DBX Web under context path {}", public_base_path);
     }
-    if password_disabled {
+    if web_state.password_disabled {
         tracing::info!("Password protection is disabled");
     } else if std::env::var("DBX_PASSWORD").is_ok() {
         tracing::info!("Password protection is enabled");
     }
-    if !password_viewer_enabled {
+    if !web_state.password_viewer_enabled {
         tracing::info!("Saved connection password viewing is disabled");
     }
-    if demo_mode {
+    if web_state.demo_mode {
         tracing::info!("Demo mode is enabled: connection/plugin/AI mutations are blocked");
     }
 
