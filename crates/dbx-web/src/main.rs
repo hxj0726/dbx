@@ -509,39 +509,7 @@ fn web_mcp_startup_error(error: String) -> String {
     format!("Failed to start DBX Web: invalid Web MCP configuration: {error}")
 }
 
-async fn serve() -> Result<(), String> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "dbx_web=info,tower_http=info".parse().unwrap()),
-        )
-        .init();
-
-    rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install rustls crypto provider");
-
-    // Data directory
-    let data_dir = std::env::var("DBX_DATA_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(home).join(".dbx-web")
-    });
-
-    let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
-
-    // Everything from the data directory down is tenant-scoped and lives in
-    // `runtime::build_tenant`; only the process-wide initialisation above
-    // belongs to `serve()`.
-    let tenant = runtime::build_tenant(data_dir, public_base_path.clone()).await?;
-    let web_state = tenant.state;
-    let backup_stop = tenant.backup_stop;
-    let backup_worker = tenant.backup_worker;
-
-    // The SSH prompt gateway is a process-global singleton: installing it per
-    // tenant would have each call clobber the previous one. It stays here at
-    // the process level so the eventual multi-tenant dispatcher has a single
-    // install point and can deliver prompts by connection owner.
-    ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
-
-    // API routes
+fn api_router(web_state: Arc<WebState>) -> Router {
     let api = Router::new()
         .route("/migration/status", get(routes::migration::status))
         .route("/migration/start", post(routes::migration::start))
@@ -1482,6 +1450,43 @@ async fn serve() -> Result<(), String> {
         .layer(middleware::from_fn_with_state(web_state.clone(), demo::demo_mode_gate))
         .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))
         .with_state(web_state.clone());
+    api
+}
+
+async fn serve() -> Result<(), String> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "dbx_web=info,tower_http=info".parse().unwrap()),
+        )
+        .init();
+
+    rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install rustls crypto provider");
+
+    // Data directory
+    let data_dir = std::env::var("DBX_DATA_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        std::path::PathBuf::from(home).join(".dbx-web")
+    });
+
+    let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
+
+    // Everything from the data directory down is tenant-scoped and lives in
+    // `runtime::build_tenant`; only the process-wide initialisation above
+    // belongs to `serve()`.
+    let tenant = runtime::build_tenant(data_dir, public_base_path.clone()).await?;
+    let web_state = tenant.state;
+    let backup_stop = tenant.backup_stop;
+    let backup_worker = tenant.backup_worker;
+
+    // The SSH prompt gateway is a process-global singleton: installing it per
+    // tenant would have each call clobber the previous one. It stays here at
+    // the process level so the eventual multi-tenant dispatcher has a single
+    // install point and can deliver prompts by connection owner.
+    ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
+
+    // API routes
+    let api = api_router(web_state.clone());
 
     // Build app
     let mut app = Router::new()
