@@ -1,0 +1,79 @@
+name: dbx-web build
+
+# 手动触发：产出一个可直接运行的 linux-x64 dbx-web 二进制，用于多租户联调验证。
+# 不随 push 运行，不参与 CI 门禁，避免占用常规流水线时间。
+#
+# 用法：Actions → "dbx-web build" → Run workflow → 从 artifacts 下载 dbx-web-linux-x64
+on:
+  workflow_dispatch:
+    inputs:
+      embed_static:
+        description: "把前端产物嵌入二进制（需先构建前端，耗时更长；关闭后需用 DBX_STATIC_DIR 指向前端目录）"
+        type: boolean
+        default: true
+
+concurrency:
+  group: dbx-web-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        if: inputs.embed_static
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.34.7
+
+      - name: Setup Node.js
+        if: inputs.embed_static
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.4
+          cache: pnpm
+
+      # rust-embed 读取的是仓库根的 dist/（见 crates/dbx-web/src/main.rs 的 #[folder]），
+      # vite 的 outDir 正是 ../../dist，所以这里构建产物必须先生成好。
+      - name: Build frontend
+        if: inputs.embed_static
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Cache cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libsecret-1-dev libdbus-1-dev pkg-config
+
+      - name: Build dbx-web
+        run: |
+          if [ "${{ inputs.embed_static }}" = "true" ]; then
+            cargo build --release --locked -p dbx-web --features embed-static
+          else
+            cargo build --release --locked -p dbx-web
+          fi
+
+      - name: Package and smoke test
+        run: |
+          mkdir -p out
+          cp target/release/dbx-web out/
+          # 能打印帮助就说明二进制可加载（动态库、glibc 都对得上）
+          ./out/dbx-web --help | tee out/help.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbx-web-linux-x64
+          path: out/
+          retention-days: 14

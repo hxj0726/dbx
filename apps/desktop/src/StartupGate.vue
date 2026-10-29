@@ -3,6 +3,7 @@ import { defineAsyncComponent, onMounted, onUnmounted, ref, shallowRef, watch } 
 import { useI18n } from "vue-i18n";
 import StartupLoading from "@/components/layout/StartupLoading.vue";
 import { useMigrationStore } from "@/stores/migrationStore";
+import { useWebIdentityStore } from "@/stores/webIdentityStore";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { webPath } from "@/lib/common/webPath";
 import { loadSavedLocale } from "@/i18n";
@@ -28,6 +29,7 @@ const LoginPage = defineAsyncComponent({ ...startupAsyncOptions, loader: () => i
 const SecurityMigrationWizard = defineAsyncComponent({ ...startupAsyncOptions, loader: () => import("@/components/migration/SecurityMigrationWizard.vue") });
 const props = defineProps<{ localeReady?: Promise<void> }>();
 const { t } = useI18n();
+const webIdentity = useWebIdentityStore();
 const migration = useMigrationStore();
 const { blocking } = migration;
 const checkingAuth = ref(true);
@@ -70,6 +72,7 @@ async function initialize() {
       const result = await checkStartupAuthentication(request.signal);
       if (request.signal.aborted) return;
       startupAuthentication.value = result;
+      webIdentity.setRole(result.role);
       setupRequired.value = result.setup_required === true;
       loginRequired.value = setupRequired.value || (result.required && !result.authenticated);
       if (loginRequired.value) {

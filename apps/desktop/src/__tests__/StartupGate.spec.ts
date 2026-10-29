@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
+import { createPinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -97,6 +98,8 @@ afterEach(() => {
 async function mountGate(localeReady?: Promise<void>) {
   const { default: Gate } = await import("../StartupGate.vue");
   mountedApp = createApp(Gate, { localeReady });
+  // StartupGate 会写入 identity store 记录角色，所以需要 Pinia。
+  mountedApp.use(createPinia());
   mountedApp.config.errorHandler = vi.fn();
   mountedApp.mount(root);
 }
@@ -119,7 +122,7 @@ describe("startup boundary", () => {
 
   it("passes the checked Web authentication state without an extra request", async () => {
     mocks.desktop.mockReturnValue(false);
-    const authentication = { required: true, authenticated: true, setup_required: false };
+    const authentication = { required: true, authenticated: true, setup_required: false, role: null };
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => authentication });
     vi.stubGlobal("fetch", fetchMock);
     businessReady.resolve();

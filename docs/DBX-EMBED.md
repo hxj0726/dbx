@@ -182,4 +182,68 @@ Next 的 route handler **不支持 Upgrade**，WS 必须落在 nginx 或这个�
 4. **高度链路**每一层都要 `height:100%` + `min-height:0`，否则双滚动条或滚不动。
 5. **iframe 内历史不进父页面**，浏览器后退会直接退出控制台；用 `postMessage` 的 `dirty`/`navigate` 兜。
 6. **插件资源的 CSP `frame-ancestors 'self'`** 在同源代理下成立（`'self'` 即 next-tdc 域）；换成独立域名代理会失效。
-7. **旧数据迁移**：历史 `DBX_DATA_DIR/dbx.db` 用 `dbx-web tenant migrate --from <dir> --to <uuid>` 落到指定租户后再对外。
+7. **旧数据迁移**：`ensureDbxConnection` 是每次查询都会执行的幂等 upsert，所以
+   next-tdc 登记过的数据源会在用户首次以本人身份访问时自动落到他自己的租户，**不需要迁移脚本**。
+   但历史 `DBX_DATA_DIR/dbx.db` 里可能还有**只在 dbx 界面里建、next-tdc 没有登记**的连接——
+   这类没有归属信息，只能人工处理：把整个旧库拷进某个租户目录作为起始数据，或让用户重新添加。
+
+## 10. 运维手册：多租户模式
+
+### 10.1 环境变量
+
+dbx-web 侧（两侧 `DBX_TRUST_KEY` 必须一致）：
+
+| 变量 | 必填 | 说明 |
+|---|---|---|
+| `DBX_TRUST_PROXY` | 是 | 置 `1` 开启签名身份模式；不设则维持单租户，行为不变 |
+| `DBX_TRUST_KEY` | 是 | HMAC 密钥，≥32 字节随机串 |
+| `DBX_DATA_DIR` | 是 | 租户数据根目录 |
+| `DBX_TENANT_CAP` | 否 | 驻留租户上限，默认 64 |
+| `DBX_TENANT_IDLE_SECS` | 否 | 空闲回收秒数，默认 1800 |
+| `DBX_PUBLIC_BASE_PATH` | **不要设** | 前缀由反代剥离；设了会变成双重前缀 |
+
+next-tdc 侧：
+
+| 变量 | 说明 |
+|---|---|
+| `DBX_WEB_URL` | 指向 dbx-web，建议 `127.0.0.1:4224` |
+| `DBX_TRUST_KEY` | 与 dbx-web 相同的密钥 |
+
+### 10.2 数据布局
+
+```
+$DBX_DATA_DIR/
+  dbx.db            # 根租户：仅供 /mcp 等进程级能力
+  tenants/
+    u-<uuid>/       # 每个用户一份
+      dbx.db
+      plugins/
+      agent/
+      secrets.key   # 每租户独立
+```
+
+`secrets.key` 每租户独立是关键的隔离边界：即便拿到别的租户的 `dbx.db`，也无法解密其中的密码。
+
+### 10.3 隔离与授权边界
+
+- **存储隔离**：连接、凭据、历史、保存的 SQL 全在各自租户目录。
+- **身份来源**：只认服务端签名的 `x-dbx-*` 头；浏览器自带的一律丢弃。
+- **角色**：只承认 `admin`，其余一律 `member`（fail-closed）。
+- **全局模块**：`/api/mcp`、`/api/system`、`/api/tenants`、插件市场安装 —— member 403。
+- **act-as**：仅 admin 可代管，且落审计。
+
+### 10.4 容量与回收
+
+租户按需创建。超过 `DBX_TENANT_CAP` 返回 503；空闲超过 `DBX_TENANT_IDLE_SECS` 的租户
+在 60s 一轮的清扫中回收（有在途请求的跳过）。回收只关句柄，磁盘数据保留，下次访问重新装配。
+
+### 10.5 回滚
+
+去掉 `DBX_TRUST_PROXY` 即回到单租户模式，`tenants/` 下的数据原样保留且不会被读取或改动。
+因此"先关反代观察、再开"是安全的。
+
+### 10.6 尚未覆盖
+
+- **WebSocket**：需 nginx 或独立 Node 进程转发 Upgrade（见第 9 节第 1 条）。
+- **`/mcp` 仍是进程级**：它挂在根状态上，所以对 member 关闭入口；要每用户 MCP 需另行设计。
+- **租户删除**：`TenantRegistry::remove` 已实现但尚无调用方，删除用户后其租户目录需人工清理。
