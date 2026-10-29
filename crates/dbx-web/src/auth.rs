@@ -268,14 +268,9 @@ fn extract_session_token<B>(req: &Request<B>) -> Option<String> {
 
 fn identity_from_headers(trust: &TrustConfig, headers: &HeaderMap) -> Result<Identity, IdentityError> {
     let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
-    let parts = (
-        header(identity::HEADER_TENANT),
-        header(identity::HEADER_ROLE),
-        header(identity::HEADER_TS),
-    );
-    let (Some(tenant), Some(role), Some(ts)) = parts else {
-        return Err(IdentityError::MissingHeaders);
-    };
+    let tenant = header(identity::HEADER_TENANT).ok_or(IdentityError::MissingHeaders)?;
+    let role = header(identity::HEADER_ROLE).ok_or(IdentityError::MissingHeaders)?;
+    let ts = header(identity::HEADER_TS).ok_or(IdentityError::MissingHeaders)?;
     let sig = header(identity::HEADER_SIG).ok_or(IdentityError::MissingHeaders)?;
     trust.verify_parts(tenant, role, header(identity::HEADER_ACT_AS), ts, sig, identity::now_secs())
 }
