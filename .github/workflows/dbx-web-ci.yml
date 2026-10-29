@@ -1,0 +1,66 @@
+name: DBX Web checks
+
+# 快速反馈通道。默认只做最小校验（单目标 cargo check），保证改代码期间每轮
+# 反馈尽量快；全量（单测 + clippy）改为手动触发 workflow_dispatch 的 full。
+on:
+  push:
+    paths:
+      - "crates/dbx-web/**"
+      - ".github/workflows/dbx-web-ci.yml"
+  pull_request:
+    paths:
+      - "crates/dbx-web/**"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "跑全量（含单测与 clippy）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dbx-web-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check:
+    name: fast-check
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libssl-dev libsecret-1-dev libdbus-1-dev pkg-config
+
+      # 默认只跑当前真正的卡点：cargo test 会连带编译 bin 目标，
+      # 类型错误在这一步就会暴露，不必先跑一次 cargo check。
+      - name: cargo test (identity unit tests)
+        run: "cargo test --locked -p dbx-web --no-default-features --bins identity::"
+
+      # 以下仅在手动触发并勾选 full 时执行：全目标编译 + 静态检查。
+      - name: cargo check (all targets)
+        if: github.event_name == 'workflow_dispatch' && inputs.full
+        run: cargo check --locked -p dbx-web --no-default-features --all-targets
+
+      - name: clippy
+        if: github.event_name == 'workflow_dispatch' && inputs.full
+        continue-on-error: true
+        run: cargo clippy --locked -p dbx-web --no-default-features --bin dbx-web

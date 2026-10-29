@@ -2,6 +2,7 @@ mod auth;
 mod credentials;
 mod demo;
 mod error;
+mod identity;
 mod routes;
 mod sse;
 mod ssh_prompt;
