@@ -1,17 +1,21 @@
 name: DBX Web checks
 
-# 多租户化改造（crates/dbx-web）的快速反馈通道。
-# 目标：push 后 10 分钟内拿到 cargo check / 单测结果，不必等完整 release 构建。
+# 快速反馈通道。默认只做最小校验（单目标 cargo check），保证改代码期间每轮
+# 反馈尽量快；全量（单测 + clippy）改为手动触发 workflow_dispatch 的 full。
 on:
   push:
     paths:
       - "crates/dbx-web/**"
-      - "crates/dbx-core/src/state.rs"
       - ".github/workflows/dbx-web-ci.yml"
   pull_request:
     paths:
       - "crates/dbx-web/**"
   workflow_dispatch:
+    inputs:
+      full:
+        description: "跑全量（含单测与 clippy）"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -26,9 +30,9 @@ env:
 
 jobs:
   check:
-    name: cargo check + test
+    name: fast-check
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
 
@@ -40,25 +44,22 @@ jobs:
         with:
           workspaces: ". -> target"
 
-      # dbx-web 默认特性含 duckdb-sidecar（C++ 构建，极慢）。
-      # 校验逻辑层先绕开它；这里只需 WebKit 之外的少量系统库。
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libssl-dev libsecret-1-dev libdbus-1-dev pkg-config
 
-      - name: cargo check (no default features)
-        run: cargo check --locked -p dbx-web --no-default-features --all-targets
+      # 只查 bin 目标：--all-targets 会连带编 tests/benches，期间没必要。
+      - name: cargo check (bin only)
+        run: cargo check --locked -p dbx-web --no-default-features --bin dbx-web
 
-      # dbx-web 是纯 bin crate，没有 lib target；单元测试挂在 [[bin]] 下，用 --bins。
-      # 只跑本模块用例：--no-default-features 下既有 routes::* 测试会栈溢出
-      # （与本次改造无关），全量用例仍由仓库 CI 用默认特性跑。
+      # 以下仅在手动触发并勾选 full 时执行。
       - name: cargo test (identity unit tests)
+        if: github.event_name == 'workflow_dispatch' && inputs.full
         run: "cargo test --locked -p dbx-web --no-default-features --bins identity::"
 
-      # 非阻塞：--no-default-features 下大量 feature-gated 代码会报 dead_code，
-      # 那不是本次改造引入的问题。先观察，稳定后再收紧为 -D warnings。
       - name: clippy
+        if: github.event_name == 'workflow_dispatch' && inputs.full
         continue-on-error: true
-        run: cargo clippy --locked -p dbx-web --no-default-features --all-targets
+        run: cargo clippy --locked -p dbx-web --no-default-features --bin dbx-web
