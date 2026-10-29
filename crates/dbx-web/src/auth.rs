@@ -266,7 +266,10 @@ fn extract_session_token<B>(req: &Request<B>) -> Option<String> {
     session_token_from_headers(req.headers())
 }
 
-fn identity_from_headers(trust: &TrustConfig, headers: &HeaderMap) -> Result<Identity, IdentityError> {
+pub(crate) fn identity_from_headers(
+    trust: &TrustConfig,
+    headers: &HeaderMap,
+) -> Result<Identity, IdentityError> {
     let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
     let tenant = header(identity::HEADER_TENANT).ok_or(IdentityError::MissingHeaders)?;
     let role = header(identity::HEADER_ROLE).ok_or(IdentityError::MissingHeaders)?;
@@ -275,7 +278,7 @@ fn identity_from_headers(trust: &TrustConfig, headers: &HeaderMap) -> Result<Ide
     trust.verify_parts(tenant, role, header(identity::HEADER_ACT_AS), ts, sig, identity::now_secs())
 }
 
-fn identity_error_response(error: IdentityError) -> Response {
+pub(crate) fn identity_error_response(error: IdentityError) -> Response {
     let status = match &error {
         IdentityError::NotConfigured => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::UNAUTHORIZED,
@@ -293,9 +296,14 @@ pub async fn auth_middleware(
         // 这段必须放在下面 `api_suffix` 之前（这里要可变借 req），也必须放在
         // bootstrap 白名单之前——反代是唯一入口，任何路径都不能免签。
         let path = req.uri().path().to_string();
-        let identity = match identity_from_headers(&trust, req.headers()) {
-            Ok(identity) => identity,
-            Err(error) => return identity_error_response(error),
+        // 分发器可能已经验过签（见 dispatch.rs），此时直接复用：`verify_parts`
+        // 带重放检测，同一组头验两次第二次会被判成 Replayed。
+        let identity = match req.extensions().get::<Identity>().cloned() {
+            Some(identity) => identity,
+            None => match identity_from_headers(&trust, req.headers()) {
+                Ok(identity) => identity,
+                Err(error) => return identity_error_response(error),
+            },
         };
         let suffix = middleware_api_path_suffix(&path, &state.public_base_path);
         if !identity.role.is_admin() && suffix.is_some_and(identity::is_admin_only_path) {

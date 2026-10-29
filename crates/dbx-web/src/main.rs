@@ -1,6 +1,7 @@
 mod auth;
 mod credentials;
 mod demo;
+mod dispatch;
 mod error;
 mod identity;
 mod routes;
@@ -509,7 +510,7 @@ fn web_mcp_startup_error(error: String) -> String {
     format!("Failed to start DBX Web: invalid Web MCP configuration: {error}")
 }
 
-fn api_router(web_state: Arc<WebState>) -> Router {
+pub(crate) fn api_router(web_state: Arc<WebState>) -> Router {
     let api = Router::new()
         .route("/migration/status", get(routes::migration::status))
         .route("/migration/start", post(routes::migration::start))
@@ -1486,7 +1487,24 @@ async fn serve() -> Result<(), String> {
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
 
     // API routes
-    let api = api_router(web_state.clone());
+    //
+    // 受信任反代模式下，同一个进程要服务多个租户：每个租户各自装配 WebState 与
+    // api_router，请求按签名头分发过去（见 dispatch.rs）。未配置反代时沿用单租户，
+    // 行为与改造前完全一致。
+    let api = if let Some(trust) = web_state.trust.clone() {
+        tracing::info!("受信任反代模式：按签名头分发到各租户");
+        let registry = crate::tenant::TenantRegistry::new(
+            web_state.data_dir.join("tenants"),
+            web_state.public_base_path.clone(),
+            crate::tenant::cap_from_env(),
+            crate::tenant::idle_from_env(),
+        );
+        let dispatch_state = Arc::new(dispatch::DispatchState { registry, trust });
+        dispatch::spawn_tenant_reaper(dispatch_state.clone());
+        dispatch::dispatcher_router(dispatch_state)
+    } else {
+        api_router(web_state.clone())
+    };
 
     // Build app
     let mut app = Router::new()
