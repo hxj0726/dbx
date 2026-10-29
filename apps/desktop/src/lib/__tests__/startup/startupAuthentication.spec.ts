@@ -14,9 +14,24 @@ describe("startup authentication", () => {
     ]) {
       const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => state });
       vi.stubGlobal("fetch", fetchMock);
-      expect(await checkStartupAuthentication()).toEqual(state);
+      // role 是可信代理模式新增的字段；未上报时为 null（表示不做门禁）。
+      expect(await checkStartupAuthentication()).toEqual({ ...state, role: null });
       expect(fetchMock).toHaveBeenCalledWith("/api/auth/check", expect.objectContaining({ credentials: "same-origin" }));
     }
+  });
+
+  it("carries the role reported by a trusted proxy", async () => {
+    const state = { required: false, authenticated: true, setup_required: false, role: "member" };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => state }));
+    expect(await checkStartupAuthentication()).toEqual(state);
+  });
+
+  it("ignores an unrecognized role", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ required: false, authenticated: true, role: "root" }) }),
+    );
+    expect((await checkStartupAuthentication()).role).toBeNull();
   });
 
   it.each([null, [], "invalid", {}, { required: "false", authenticated: true }, { required: false, authenticated: "true" }])("fails closed for malformed authentication data: %j", async (state) => {
