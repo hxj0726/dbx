@@ -29,6 +29,9 @@ pub struct AuthCheckResponse {
     pub authenticated: bool,
     pub required: bool,
     pub setup_required: bool,
+    /// 可信代理模式下的角色（admin/member）；None 表示沿用口令会话模式。
+    /// 前端据此对"公共配置"类模块做门禁。
+    pub role: Option<&'static str>,
 }
 
 const MAX_ATTEMPTS: u32 = 5;
@@ -168,18 +171,23 @@ pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
 }
 
 pub async fn check(State(state): State<Arc<WebState>>, req: Request<axum::body::Body>) -> Json<AuthCheckResponse> {
+    let role = req.extensions().get::<Identity>().map(|identity| identity.role.as_str());
+    // 可信代理模式：身份由签名头决定，既不需要口令，也不该提示初始化口令。
+    if role.is_some() {
+        return Json(AuthCheckResponse { authenticated: true, required: false, setup_required: false, role });
+    }
     if state.password_disabled {
-        return Json(AuthCheckResponse { authenticated: true, required: false, setup_required: false });
+        return Json(AuthCheckResponse { authenticated: true, required: false, setup_required: false, role: None });
     }
     let has_password = state.password_hash.read().await.is_some();
     if !has_password {
-        return Json(AuthCheckResponse { authenticated: false, required: false, setup_required: true });
+        return Json(AuthCheckResponse { authenticated: false, required: false, setup_required: true, role: None });
     }
     let authenticated = match extract_session_token(&req) {
         Some(token) => state.sessions.read().await.contains(&token),
         None => false,
     };
-    Json(AuthCheckResponse { authenticated, required: true, setup_required: false })
+    Json(AuthCheckResponse { authenticated, required: true, setup_required: false, role: None })
 }
 
 pub async fn change_password(
@@ -266,10 +274,7 @@ fn extract_session_token<B>(req: &Request<B>) -> Option<String> {
     session_token_from_headers(req.headers())
 }
 
-pub(crate) fn identity_from_headers(
-    trust: &TrustConfig,
-    headers: &HeaderMap,
-) -> Result<Identity, IdentityError> {
+pub(crate) fn identity_from_headers(trust: &TrustConfig, headers: &HeaderMap) -> Result<Identity, IdentityError> {
     let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
     let tenant = header(identity::HEADER_TENANT).ok_or(IdentityError::MissingHeaders)?;
     let role = header(identity::HEADER_ROLE).ok_or(IdentityError::MissingHeaders)?;
