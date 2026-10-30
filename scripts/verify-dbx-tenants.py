@@ -17,15 +17,24 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:4224").rstrip("/")
 KEY = os.environ.get("DBX_TRUST_KEY", "").encode()
 failures: list[str] = []
 
 
-def sign(tenant: str, role: str = "member", act_as: str = "", ts: int | None = None) -> dict[str, str]:
+def sign(
+    tenant: str, role: str = "member", act_as: str = "", ts: int | None = None, nonce: str | None = None
+) -> dict[str, str]:
+    """按生产协议签名：canonical 末尾带一次性 nonce。
+
+    不传 nonce 时随机生成一个。同一租户一秒内可以发多个请求——这正是 nonce 存在的
+    原因：旧协议用 (tenant, ts) 做重放键，第二秒内的第二个请求会被误判成重放。
+    """
     stamp = str(ts if ts is not None else int(time.time()))
-    canonical = f"{tenant}\n{role}\n{act_as}\n{stamp}"
+    token = nonce if nonce is not None else uuid.uuid4().hex
+    canonical = f"{tenant}\n{role}\n{act_as}\n{stamp}\n{token}"
     digest = hmac.new(KEY, canonical.encode(), hashlib.sha256).digest()
     sig = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
     headers = {
@@ -33,6 +42,7 @@ def sign(tenant: str, role: str = "member", act_as: str = "", ts: int | None = N
         "x-dbx-role": role,
         "x-dbx-ts": stamp,
         "x-dbx-sig": sig,
+        "x-dbx-nonce": token,
     }
     if act_as:
         headers["x-dbx-act-as"] = act_as
@@ -99,7 +109,20 @@ def main() -> None:
     status, _ = call("GET", "/api/system/fonts", sign(alpha, role="admin"))
     check("admin 访问 /api/system 放行", status == 200, f"status={status}")
 
-    # 7. 非法租户 id 必须被拒（防止路径穿越）
+    # 7. 驱动/插件属于管理面：读接口要留给普通用户（连接对话框靠它判断驱动装没装），
+    #    写接口只有管理员能过。用 update-blockers 验证 admin 侧放行，避免真的去下载驱动。
+    status, _ = call("GET", "/api/agents/installed", sign(alpha, role="member"))
+    check("member 可读已安装驱动", status == 200, f"status={status}")
+    status, _ = call("GET", "/api/jdbc/drivers", sign(alpha, role="member"))
+    check("member 可读 JDBC 驱动列表", status == 200, f"status={status}")
+    status, _ = call("POST", "/api/agents/install", sign(alpha, role="member"), {"dbType": "oracle"})
+    check("member 安装驱动被拒", status == 403, f"status={status}")
+    status, _ = call("POST", "/api/jdbc/drivers/maven", sign(alpha, role="member"), {})
+    check("member 用 Maven 装 JDBC 驱动被拒", status == 403, f"status={status}")
+    status, _ = call("POST", "/api/agents/update-blockers", sign(alpha, role="admin"), {})
+    check("admin 的驱动写接口不被角色门禁拦截", status != 403, f"status={status}")
+
+    # 8. 非法租户 id 必须被拒（防止路径穿越）
     status, _ = call("GET", "/api/connection/list", sign("../etc"))
     check("非法租户 id 被拒", status == 400, f"status={status}")
 

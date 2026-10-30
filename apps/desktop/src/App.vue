@@ -37,6 +37,7 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { enforceRightSidebarPanelExclusivity, RIGHT_SIDEBAR_PANEL_IDS, transitionRightSidebarPanels, useSettingsStore, type RightSidebarPanelId, type RightSidebarPanelState } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
+import { useWebIdentityStore } from "@/stores/webIdentityStore";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
@@ -286,6 +287,7 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const navigationStore = useNavigationStore();
 const settingsStore = useSettingsStore();
+const webIdentity = useWebIdentityStore();
 const { active: appBackgroundActive, backgroundObjectUrl: appBackgroundObjectUrl, backgroundImageStyle: appBackgroundImageStyle } = useBackgroundImage(settingsStore);
 const editorFontFamilyStyle = useEditorFontFamilyStyle();
 const { uiFontFamilyPreview } = useUiFontFamilyPreview();
@@ -1528,6 +1530,13 @@ function finishCloseSettingsPage() {
 const driverStoreFocus = ref<DriverStoreFocus | null>(null);
 
 function openDriverStorePage(target?: DriverStoreTab | DriverStoreFocus | null) {
+  // 驱动安装/卸载写的是进程级共享的驱动目录，属于多租户下的管理面。这里收口
+  // 所有入口：工具栏、命令菜单、`dbx-open-driver-store` 事件（侧栏驱动提示）、
+  // 连接对话框里的「驱动管理」链接，以及设置-更新页的按钮。
+  if (!webIdentity.isAdmin) {
+    toast(t("common.adminOnlyHint"), 4000);
+    return;
+  }
   if (typeof target === "string") {
     driverStoreActiveTab.value = target;
     driverStoreFocus.value = null;
@@ -1560,6 +1569,11 @@ function closeDriverStorePage() {
 }
 
 function openPluginCenterPage(focus?: PluginCenterFocus | null) {
+  // 插件安装/卸载与驱动同类：普通用户只读，配置入口只给管理员。
+  if (!webIdentity.isAdmin) {
+    toast(t("common.adminOnlyHint"), 4000);
+    return;
+  }
   pluginCenterFocus.value = focus ?? null;
   pluginCenterTabOpen.value = true;
   activateMainContentSurface("pluginCenter");

@@ -13551,7 +13551,7 @@ LIMIT 100;</pre>
                       <Loader2 v-if="props.checkingUpdates" class="h-3.5 w-3.5 animate-spin" />
                       <span v-else>{{ t("settings.checkUpdates") }}</span>
                     </Button>
-                    <Button v-if="hasAnyUpdate" type="button" size="sm" class="h-8" :disabled="props.checkingUpdates || props.updatingAllUpdates" @click="emit('update-all')">
+                    <Button v-if="hasAnyUpdate && webIdentity.isAdmin" type="button" size="sm" class="h-8" :disabled="props.checkingUpdates || props.updatingAllUpdates" @click="emit('update-all')">
                       <Loader2 v-if="props.updatingAllUpdates" class="h-3.5 w-3.5 animate-spin" />
                       <RefreshCw v-else class="h-3.5 w-3.5" />
                       {{ t("settings.updateAll") }}
@@ -13572,7 +13572,7 @@ LIMIT 100;</pre>
                       <Switch id="auto-update-app" v-model="editAutoUpdateApp" :aria-label="t('settings.autoUpdateApp')" />
                     </div>
                   </div>
-                  <div class="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2.5 text-sm">
+                  <div v-if="webIdentity.isAdmin" class="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2.5 text-sm">
                     <button type="button" class="min-w-0 space-y-0.5 rounded-sm text-left transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50" @click="emit('open-driver-store', 'agent')">
                       <div class="font-medium">{{ t("settings.updateDrivers") }}</div>
                       <div class="flex items-center gap-1.5" :class="updateCheckLoading.drivers ? 'text-muted-foreground' : (props.driverUpdateCount || 0) > 0 ? 'text-primary' : 'text-muted-foreground'">
@@ -13585,7 +13585,7 @@ LIMIT 100;</pre>
                       <Switch id="auto-update-drivers" v-model="editAutoUpdateDrivers" :aria-label="t('settings.autoUpdateDrivers')" />
                     </div>
                   </div>
-                  <div class="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2.5 text-sm">
+                  <div v-if="webIdentity.isAdmin" class="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2.5 text-sm">
                     <button type="button" class="min-w-0 space-y-0.5 rounded-sm text-left transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50" @click="emit('open-driver-store', 'jdbc')">
                       <div class="font-medium">{{ t("settings.updateJdbc") }}</div>
                       <div class="flex items-center gap-1.5" :class="updateCheckLoading.jdbc ? 'text-muted-foreground' : props.jdbcUpdateAvailable ? 'text-primary' : 'text-muted-foreground'">

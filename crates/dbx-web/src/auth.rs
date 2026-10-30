@@ -317,7 +317,8 @@ pub async fn auth_middleware(
             },
         };
         let suffix = middleware_api_path_suffix(&path, &state.public_base_path);
-        if !identity.role.is_admin() && suffix.is_some_and(identity::is_admin_only_path) {
+        let admin_only = suffix.is_some_and(|suffix| identity::is_admin_only_request(req.method(), suffix));
+        if !identity.role.is_admin() && admin_only {
             return (StatusCode::FORBIDDEN, "该模块仅管理员可操作").into_response();
         }
         if identity.is_acting_as() {

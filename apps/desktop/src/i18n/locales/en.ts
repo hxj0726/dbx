@@ -4142,6 +4142,7 @@ export default {
     loadFailed: "Unable to load DBX. Please try again.",
   },
   common: {
+    adminOnlyHint: "Drivers and plugins are managed by your administrator — please contact them",
     fileNotFound: "File does not exist: {path}",
     loading: "Loading...",
     stopping: "Stopping...",

@@ -4071,6 +4071,7 @@ export default withEnglishFallback({
     loadFailed: "无法加载 DBX，请重试。",
   },
   common: {
+    adminOnlyHint: "驱动与插件由管理员统一配置，请联系管理员",
     fileNotFound: "文件不存在：{path}",
     loading: "加载中...",
     stopping: "正在停止...",

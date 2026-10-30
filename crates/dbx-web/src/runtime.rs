@@ -55,6 +55,10 @@ pub async fn build_tenant(data_dir: PathBuf, public_base_path: String) -> Result
         return Err(format!("Failed to create data directory {}: {error}", data_dir.display()));
     }
 
+    // 驱动目录（Agent 包、托管 JRE）默认跟着租户目录一起隔离；`DBX_AGENT_DIR`
+    // 可以把它提到进程级共享位置，供多个租户只读复用同一份驱动。
+    let agent_dir = web_agent_dir(&data_dir);
+
     let app_state = {
         let db_path = data_dir.join("dbx.db");
         let storage = match Storage::open_unmigrated(&db_path).await {
@@ -86,7 +90,7 @@ pub async fn build_tenant(data_dir: PathBuf, public_base_path: String) -> Result
         Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
             storage,
             data_dir.join("plugins"),
-            web_agent_dir(&data_dir),
+            agent_dir.clone(),
             env!("CARGO_PKG_VERSION"),
         ))
     };
@@ -131,6 +135,17 @@ pub async fn build_tenant(data_dir: PathBuf, public_base_path: String) -> Result
         Ok(trust) => trust.map(Arc::new),
         Err(error) => return Err(format!("invalid trust proxy configuration: {error}")),
     };
+
+    // 驱动管理是多租户下的管理面（普通用户只读）。如果没把目录提到共享位置，
+    // 管理员装的驱动只落在自己的租户目录里，普通用户永远提示"驱动未安装"——
+    // 这个故障很隐蔽，所以在启动时就喊出来。
+    log::info!("租户驱动目录: {}", agent_dir.display());
+    if trust.is_some() && std::env::var_os("DBX_AGENT_DIR").is_none() {
+        log::warn!(
+            "受信代理模式下未设置 DBX_AGENT_DIR，驱动目录 {} 按租户隔离：管理员安装的驱动不会共享给普通用户",
+            agent_dir.display()
+        );
+    }
 
     let web_state = Arc::new(WebState {
         app: app_state,

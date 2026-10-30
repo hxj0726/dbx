@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::http::Method;
 use base64::Engine as _;
 use pbkdf2::hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -313,13 +314,45 @@ pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// 仅管理员可访问的接口前缀（相对 `/api`，不含 base path）。
-pub const ADMIN_ONLY_PREFIXES: &[&str] =
-    &["/mcp", "/system", "/tenants", "/plugins/install-url", "/plugins/marketplace/install"];
+/// 仅管理员可访问的接口前缀（相对 `/api`，不含 base path），所有方法都拦。
+pub const ADMIN_ONLY_PREFIXES: &[&str] = &[
+    "/mcp",
+    "/system",
+    "/tenants",
+    "/plugins/install",
+    "/plugins/uninstall",
+    "/plugins/rollback",
+    "/plugins/trusted-keys",
+    "/plugins/repositories",
+    "/plugins/marketplace/install",
+];
+
+/// 这些前缀下只有写操作属于管理面，读接口普通用户仍然要用：
+/// 连接对话框靠它们判断"这根驱动装没装"、JDBC 面板靠它们列出已导入的 JAR。
+/// 拦掉读接口会让普通用户看到"驱动未安装"却无从判断，属于误伤。
+pub const ADMIN_ONLY_WRITE_PREFIXES: &[&str] = &["/agents", "/jdbc"];
+
+fn matches_prefix(path: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+}
 
 /// 判断某个 API 路径是否属于全局配置（非管理员 403）。
 pub fn is_admin_only_path(path: &str) -> bool {
-    ADMIN_ONLY_PREFIXES.iter().any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+    matches_prefix(path, ADMIN_ONLY_PREFIXES)
+}
+
+/// 判断某个请求是否属于管理面：路径级前缀全拦，写前缀只拦非只读方法。
+///
+/// 驱动与插件的安装/卸载/升级会改进程级共享状态（共享驱动目录、插件目录），
+/// 因此不能只靠前端隐藏入口；普通用户绕过界面直接调接口同样要 403。
+pub fn is_admin_only_request(method: &Method, path: &str) -> bool {
+    if is_admin_only_path(path) {
+        return true;
+    }
+    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        return false;
+    }
+    matches_prefix(path, ADMIN_ONLY_WRITE_PREFIXES)
 }
 
 #[cfg(test)]
@@ -427,7 +460,52 @@ mod tests {
         assert!(is_admin_only_path("/mcp"));
         assert!(is_admin_only_path("/mcp/tools"));
         assert!(is_admin_only_path("/system/info"));
+        assert!(is_admin_only_path("/plugins/install"));
+        assert!(is_admin_only_path("/plugins/install-url"));
+        assert!(is_admin_only_path("/plugins/repositories/save"));
         assert!(!is_admin_only_path("/mcpfoo"));
         assert!(!is_admin_only_path("/connections"));
+        assert!(!is_admin_only_path("/plugins"));
+        assert!(!is_admin_only_path("/agents/install"), "驱动安装属于写前缀，不在路径级名单");
+    }
+
+    /// 驱动/插件的读接口必须留给普通用户：连接对话框靠它们判断驱动是否已安装。
+    #[test]
+    fn allows_member_reads_but_blocks_writes_on_driver_surfaces() {
+        assert!(!is_admin_only_request(&Method::GET, "/agents/installed"));
+        assert!(!is_admin_only_request(&Method::GET, "/agents/installed/oracle"));
+        assert!(!is_admin_only_request(&Method::GET, "/agents/storage-usage"));
+        assert!(!is_admin_only_request(&Method::GET, "/jdbc/drivers"));
+        assert!(!is_admin_only_request(&Method::HEAD, "/agents/installed"));
+        assert!(!is_admin_only_request(&Method::OPTIONS, "/agents/install"));
+
+        assert!(is_admin_only_request(&Method::POST, "/agents/install"));
+        assert!(is_admin_only_request(&Method::POST, "/agents/uninstall"));
+        assert!(is_admin_only_request(&Method::POST, "/agents/upgrade-all"));
+        assert!(is_admin_only_request(&Method::POST, "/agents/java-runtime"));
+        assert!(is_admin_only_request(&Method::DELETE, "/agents/download-cache"));
+        assert!(is_admin_only_request(&Method::POST, "/jdbc/drivers"));
+        assert!(is_admin_only_request(&Method::DELETE, "/jdbc/drivers/mysql-8.0"));
+        assert!(is_admin_only_request(&Method::POST, "/jdbc/drivers/maven"));
+    }
+
+    /// 路径级名单对普通用户是"所有方法都拦"，不能被写前缀的只读豁免漏掉。
+    #[test]
+    fn path_level_prefixes_block_every_method() {
+        for method in [Method::GET, Method::POST, Method::DELETE] {
+            assert!(is_admin_only_request(&method, "/mcp"));
+            assert!(is_admin_only_request(&method, "/system/fonts"));
+            assert!(is_admin_only_request(&method, "/tenants"));
+            assert!(is_admin_only_request(&method, "/plugins/uninstall"));
+        }
+    }
+
+    /// 前缀匹配不能误伤同前缀开头的其他接口。
+    #[test]
+    fn write_prefixes_do_not_over_match() {
+        assert!(!is_admin_only_request(&Method::POST, "/agentsfoo"));
+        assert!(!is_admin_only_request(&Method::POST, "/jdbcx/drivers"));
+        assert!(!is_admin_only_request(&Method::POST, "/connections"));
+        assert!(!is_admin_only_request(&Method::POST, "/query"));
     }
 }

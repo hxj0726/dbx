@@ -14,6 +14,7 @@ import AppLogo from "@/components/icons/AppLogo.vue";
 import { MAC_TRAFFIC_LIGHT_X, macTrafficLightInsetPaddingForScale, shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useWebIdentityStore } from "@/stores/webIdentityStore";
 import { isSystemAppThemeMode, type AppThemeMode } from "@/lib/app/appTheme";
 import { formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 
@@ -87,6 +88,10 @@ const { t } = useI18n();
 const { toast } = useToast();
 
 const settingsStore = useSettingsStore();
+// 驱动管理与插件中心会改进程级共享状态（驱动目录、插件目录），可信代理模式下
+// 只有管理员能配置；普通用户连入口都不该看到，否则点开只是一片 403。
+const webIdentity = useWebIdentityStore();
+const canManagePublicConfig = computed(() => webIdentity.isAdmin);
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const webLogoPosition = computed(() => settingsStore.editorSettings.webLogoPosition ?? "left");
 const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates);
@@ -470,7 +475,7 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
       disabled: !props.hasConnections,
     });
   }
-  if (includeVisiblePrimaryItems || !toolbarItems.value.driverManager) {
+  if (canManagePublicConfig.value && (includeVisiblePrimaryItems || !toolbarItems.value.driverManager)) {
     items.push({
       value: "driver-store",
       label: props.agentDriverUpdateCount > 0 ? `${t("toolbar.driverManager")} (${props.agentDriverUpdateCount})` : t("toolbar.driverManager"),
@@ -479,7 +484,7 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
       disabled: false,
     });
   }
-  if (includeVisiblePrimaryItems || !toolbarItems.value.pluginCenter) {
+  if (canManagePublicConfig.value && (includeVisiblePrimaryItems || !toolbarItems.value.pluginCenter)) {
     items.push({ value: "plugin-center", label: t("toolbar.pluginCenter"), icon: PlugZap, action: () => emit("open-plugin-center"), disabled: false });
   }
   if (toolbarItems.value.sqlFile) {
@@ -614,13 +619,13 @@ const toolbarStyle = computed(() => {
         <span :class="toolbarTextLabelClass">{{ t("transfer.dataTransfer") }}</span>
       </Button>
 
-      <Button v-if="toolbarItems.driverManager" variant="ghost" size="sm" :class="[toolbarTextButtonClass, { 'bg-accent': showDriverStore }]" @click="emit('open-driver-store')">
+      <Button v-if="toolbarItems.driverManager && canManagePublicConfig" variant="ghost" size="sm" :class="[toolbarTextButtonClass, { 'bg-accent': showDriverStore }]" @click="emit('open-driver-store')">
         <Package class="h-3.5 w-3.5" />
         <span :class="toolbarTextLabelClass">{{ t("toolbar.driverManager") }}</span>
         <!-- 小圆点仅提示"有可更新驱动"，具体数量交给对话框内标签页红点展示，避免工具栏长期挂红数字。 -->
         <span v-if="agentDriverUpdateCount > 0" class="ml-0.5 inline-block h-2 w-2 rounded-full bg-red-500" :aria-label="t('toolbar.updatableDriverCount')" :title="t('toolbar.updatableDriverCount')" />
       </Button>
-      <div v-if="toolbarItems.pluginCenter || showPluginCenterShortcuts" ref="pluginCenterGroup" class="flex shrink-0 items-center rounded-md" :class="{ 'bg-accent': showPluginCenter }">
+      <div v-if="canManagePublicConfig && (toolbarItems.pluginCenter || showPluginCenterShortcuts)" ref="pluginCenterGroup" class="flex shrink-0 items-center rounded-md" :class="{ 'bg-accent': showPluginCenter }">
         <Button v-if="toolbarItems.pluginCenter" variant="ghost" size="sm" :class="[toolbarTextButtonClass, { 'rounded-r-none': showPluginCenterShortcuts }]" @click="emit('open-plugin-center')">
           <PlugZap class="h-3.5 w-3.5" />
           <span :class="toolbarTextLabelClass">{{ t("toolbar.pluginCenter") }}</span>
