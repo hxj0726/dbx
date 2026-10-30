@@ -1,15 +1,16 @@
 name: dbx-web build
 
-# 手动触发。产物按官方发布包的命名与目录结构生成：
-#   DBX_<version>_x64-browser-static.tar.gz
-#   DBX_<version>_x64-browser-static.tar.gz.sha256
-# 解压后是同名目录 dbx-linux-x64-browser-static/，内含 bin/dbx-web-bin、
-# dbx 启动脚本、dbx-web 软链和 README.txt。
+# 手动触发，按官方发布包的命名与结构产出 browser-static 包。
+# 平台可选：默认只构建 linux-x64，需要别的平台时在触发时选。
 #
-# 构建参数与 .github/workflows/release.yml 的 static-browser 任务逐项对齐：
-# 同一个 musl target、同一组 features、同一个打包脚本，所以两个流程产出的包可以互换。
+# 产物命名与 release.yml 对齐：
+#   linux-x64    DBX_<ver>_x64-browser-static.tar.gz     + .tar.gz.sha256
+#   linux-arm64  DBX_<ver>_arm64-browser-static.tar.gz   + .tar.gz.sha256
+#   windows-x64  dbx-web_<ver>_x86_64-browser-static.zip + .zip.sha256
 #
-# 用法：Actions → "dbx-web build" → Run workflow → 下载对应 artifact。
+# Windows 这里用 windows-2022 + 默认 MSVC 目标，产出可直接运行的 zip。
+# release.yml 里的 Windows 包是 Win7 兼容构建（nightly + build-std + 自定义 target），
+# 那套仍留在 release.yml，不在本工作流重复。
 on:
   workflow_dispatch:
     inputs:
@@ -17,18 +18,28 @@ on:
         description: "覆盖版本号（留空则读 crates/dbx-web 的 Cargo 版本）"
         type: string
         default: ""
+      platforms:
+        description: "要构建的平台"
+        type: choice
+        options:
+          - linux-x64
+          - linux-arm64
+          - linux-all
+          - windows-x64
+          - all
+        default: linux-x64
 
 concurrency:
   group: dbx-web-build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  static-browser:
+  linux-x64:
+    if: contains(fromJSON('["linux-x64","linux-all","all"]'), inputs.platforms)
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: "0"
-      # 官方 x64 就用这一条；静态链 musl 后再用 readelf 校验没有解释器。
       RUSTFLAGS: "-C target-feature=+crt-static"
       DBX_STATIC_TARGET: x86_64-unknown-linux-musl
       DBX_ARCH: x64
@@ -51,8 +62,7 @@ jobs:
         with:
           targets: ${{ env.DBX_STATIC_TARGET }}
 
-      # 这个 pip 包同时带来 cargo-zigbuild 子命令和它依赖的 zig，
-      # 因此不需要额外的 zig 安装步骤（官方 release 也只是这一步）。
+      # 这个 pip 包同时带来 cargo-zigbuild 子命令和它依赖的 zig。
       - name: Install cargo-zigbuild
         run: pip3 install cargo-zigbuild
 
@@ -60,11 +70,10 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
-          shared-key: static-browser-x64
+          shared-key: static-browser-${{ env.DBX_ARCH }}
           cache-on-failure: true
 
-      # rust-embed 读仓库根的 dist/（crates/dbx-web 里是 #[folder = "../../dist"]），
-      # vite 的 outDir 正是 ../../dist，所以必须先构建前端。
+      # rust-embed 读仓库根的 dist/，vite 的 outDir 正是 ../../dist。
       - name: Build frontend
         run: pnpm build
 
@@ -100,7 +109,6 @@ jobs:
 
       - name: Verify package layout
         run: |
-          # 顶层目录名必须与官方一致，且启动脚本能打印帮助
           tar -tzf "$ASSET" > /tmp/layout.txt
           head -n 10 /tmp/layout.txt
           rm -rf /tmp/smoke && mkdir -p /tmp/smoke
@@ -115,4 +123,172 @@ jobs:
           path: |
             DBX_*_${{ env.DBX_ARCH }}-browser-static.tar.gz
             DBX_*_${{ env.DBX_ARCH }}-browser-static.tar.gz.sha256
+          retention-days: 14
+
+  linux-arm64:
+    if: contains(fromJSON('["linux-arm64","linux-all","all"]'), inputs.platforms)
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+      # 64K max-page-size 让二进制兼容 4K/16K/64K 页大小的 ARM64 内核。
+      RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=-z -C link-arg=max-page-size=65536"
+      DBX_STATIC_TARGET: aarch64-unknown-linux-musl
+      DBX_ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ env.DBX_STATIC_TARGET }}
+
+      - name: Install cargo-zigbuild
+        run: pip3 install cargo-zigbuild
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: static-browser-${{ env.DBX_ARCH }}
+          cache-on-failure: true
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Build static web binary
+        run: |
+          cargo zigbuild --release -p dbx-web --target "$DBX_STATIC_TARGET" \
+            --no-default-features --features "embed-static,duckdb-sidecar,dynamodb,mq-admin,dbx-core/sqlite-bundled"
+
+      - name: Package static browser runtime
+        run: |
+          chmod +x scripts/package-web-static.sh
+          ./scripts/package-web-static.sh
+
+      - name: Rename to official asset naming
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          VERSION="$VERSION_INPUT"
+          if [ -z "$VERSION" ]; then
+            VERSION="$(cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name == "dbx-web") | .version')"
+          fi
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "无法确定 dbx-web 版本号" >&2
+            exit 1
+          fi
+          SOURCE="dist-web-static/dbx-linux-${DBX_ARCH}-browser-static.tar.gz"
+          ASSET="DBX_${VERSION}_${DBX_ARCH}-browser-static.tar.gz"
+          cp "$SOURCE" "$ASSET"
+          sha256sum "$ASSET" | tee "${ASSET}.sha256"
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
+          echo "PACKAGE_DIR=dbx-linux-${DBX_ARCH}-browser-static" >> "$GITHUB_ENV"
+
+      - name: Verify package layout
+        run: |
+          tar -tzf "$ASSET" > /tmp/layout.txt
+          head -n 10 /tmp/layout.txt
+          rm -rf /tmp/smoke && mkdir -p /tmp/smoke
+          tar -C /tmp/smoke -xzf "$ASSET"
+          test -d "/tmp/smoke/$PACKAGE_DIR" || { echo "顶层目录不是 $PACKAGE_DIR" >&2; exit 1; }
+          "/tmp/smoke/$PACKAGE_DIR/dbx" --help
+          file "/tmp/smoke/$PACKAGE_DIR/bin/dbx-web-bin"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DBX-browser-static-${{ env.DBX_ARCH }}
+          path: |
+            DBX_*_${{ env.DBX_ARCH }}-browser-static.tar.gz
+            DBX_*_${{ env.DBX_ARCH }}-browser-static.tar.gz.sha256
+          retention-days: 14
+
+  windows-x64:
+    if: contains(fromJSON('["windows-x64","all"]'), inputs.platforms)
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: static-browser-win-x64
+          cache-on-failure: true
+
+      - name: Build frontend
+        run: pnpm build
+
+      # 不设 RUSTFLAGS：让 .cargo/config.toml 里的 Windows 目标参数（8MiB 主线程栈）生效。
+      - name: Build web binary
+        run: |
+          cargo build --locked --release -p dbx-web --no-default-features --features "embed-static,duckdb-sidecar,dynamodb,mq-admin,dbx-core/sqlite-bundled"
+
+      - name: Package browser-static zip
+        shell: pwsh
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          $version = $env:VERSION_INPUT
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+            $version = ($meta.packages | Where-Object { $_.name -eq 'dbx-web' }).version
+          }
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            Write-Error "无法确定 dbx-web 版本号"
+            exit 1
+          }
+          $arch = "x86_64"
+          $dir = "DBX_${version}_${arch}"
+          $exe = "target/release/dbx-web.exe"
+          if (!(Test-Path $exe)) {
+            Write-Error "缺少构建产物: $exe"
+            exit 1
+          }
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item $exe (Join-Path $dir "dbx-web.exe") -Force
+          Copy-Item "LICENSE" (Join-Path $dir "LICENSE") -Force
+          Copy-Item "README.md" (Join-Path $dir "README.md") -Force
+          Copy-Item ".github/scripts/start-dbx-web.bat" (Join-Path $dir "start.bat") -Force
+
+          $zip = "dbx-web_${version}_${arch}-browser-static.zip"
+          Compress-Archive -Path (Join-Path $dir "*") -DestinationPath $zip -Force
+          # 官方 Windows 的 .sha256 只放哈希值，不像 Linux 那样带文件名。
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -Path "$zip.sha256" -Value $hash -Encoding utf8NoBOM
+          Get-ChildItem $dir | Select-Object Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbx-web-browser-static-x86_64
+          path: |
+            dbx-web_*_x86_64-browser-static.zip
+            dbx-web_*_x86_64-browser-static.zip.sha256
           retention-days: 14
