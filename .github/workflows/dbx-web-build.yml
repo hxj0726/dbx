@@ -1,79 +1,118 @@
 name: dbx-web build
 
-# 手动触发：产出一个可直接运行的 linux-x64 dbx-web 二进制，用于多租户联调验证。
-# 不随 push 运行，不参与 CI 门禁，避免占用常规流水线时间。
+# 手动触发。产物按官方发布包的命名与目录结构生成：
+#   DBX_<version>_x64-browser-static.tar.gz
+#   DBX_<version>_x64-browser-static.tar.gz.sha256
+# 解压后是同名目录 dbx-linux-x64-browser-static/，内含 bin/dbx-web-bin、
+# dbx 启动脚本、dbx-web 软链和 README.txt。
 #
-# 用法：Actions → "dbx-web build" → Run workflow → 从 artifacts 下载 dbx-web-linux-x64
+# 构建参数与 .github/workflows/release.yml 的 static-browser 任务逐项对齐：
+# 同一个 musl target、同一组 features、同一个打包脚本，所以两个流程产出的包可以互换。
+#
+# 用法：Actions → "dbx-web build" → Run workflow → 下载对应 artifact。
 on:
   workflow_dispatch:
     inputs:
-      embed_static:
-        description: "把前端产物嵌入二进制（需先构建前端，耗时更长；关闭后需用 DBX_STATIC_DIR 指向前端目录）"
-        type: boolean
-        default: true
+      version:
+        description: "覆盖版本号（留空则读 crates/dbx-web 的 Cargo 版本）"
+        type: string
+        default: ""
 
 concurrency:
   group: dbx-web-build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
+  static-browser:
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+      # 官方 x64 就用这一条；静态链 musl 后再用 readelf 校验没有解释器。
+      RUSTFLAGS: "-C target-feature=+crt-static"
+      DBX_STATIC_TARGET: x86_64-unknown-linux-musl
+      DBX_ARCH: x64
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup pnpm
-        if: inputs.embed_static
         uses: pnpm/action-setup@v6
-        with:
-          version: 10.34.7
 
       - name: Setup Node.js
-        if: inputs.embed_static
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v4
         with:
-          node-version: 22.23.4
-          cache: pnpm
+          node-version: 22
 
-      # rust-embed 读取的是仓库根的 dist/（见 crates/dbx-web/src/main.rs 的 #[folder]），
-      # vite 的 outDir 正是 ../../dist，所以这里构建产物必须先生成好。
-      - name: Build frontend
-        if: inputs.embed_static
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm build
+      - name: Install frontend dependencies
+        run: pnpm install
 
-      - name: Install Rust
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ env.DBX_STATIC_TARGET }}
 
-      - name: Cache cargo
+      # 这个 pip 包同时带来 cargo-zigbuild 子命令和它依赖的 zig，
+      # 因此不需要额外的 zig 安装步骤（官方 release 也只是这一步）。
+      - name: Install cargo-zigbuild
+        run: pip3 install cargo-zigbuild
+
+      - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          shared-key: static-browser-x64
+          cache-on-failure: true
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev libsecret-1-dev libdbus-1-dev pkg-config
+      # rust-embed 读仓库根的 dist/（crates/dbx-web 里是 #[folder = "../../dist"]），
+      # vite 的 outDir 正是 ../../dist，所以必须先构建前端。
+      - name: Build frontend
+        run: pnpm build
 
-      - name: Build dbx-web
+      - name: Build static web binary
         run: |
-          if [ "${{ inputs.embed_static }}" = "true" ]; then
-            cargo build --release --locked -p dbx-web --features embed-static
-          else
-            cargo build --release --locked -p dbx-web
+          cargo zigbuild --release -p dbx-web --target "$DBX_STATIC_TARGET" \
+            --no-default-features --features "embed-static,duckdb-sidecar,dynamodb,mq-admin,dbx-core/sqlite-bundled"
+
+      - name: Package static browser runtime
+        run: |
+          chmod +x scripts/package-web-static.sh
+          ./scripts/package-web-static.sh
+
+      - name: Rename to official asset naming
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          VERSION="$VERSION_INPUT"
+          if [ -z "$VERSION" ]; then
+            VERSION="$(cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name == "dbx-web") | .version')"
           fi
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "无法确定 dbx-web 版本号" >&2
+            exit 1
+          fi
+          SOURCE="dist-web-static/dbx-linux-${DBX_ARCH}-browser-static.tar.gz"
+          ASSET="DBX_${VERSION}_${DBX_ARCH}-browser-static.tar.gz"
+          cp "$SOURCE" "$ASSET"
+          sha256sum "$ASSET" | tee "${ASSET}.sha256"
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
+          echo "PACKAGE_DIR=dbx-linux-${DBX_ARCH}-browser-static" >> "$GITHUB_ENV"
 
-      - name: Package and smoke test
+      - name: Verify package layout
         run: |
-          mkdir -p out
-          cp target/release/dbx-web out/
-          # 能打印帮助就说明二进制可加载（动态库、glibc 都对得上）
-          ./out/dbx-web --help | tee out/help.txt
+          # 顶层目录名必须与官方一致，且启动脚本能打印帮助
+          tar -tzf "$ASSET" > /tmp/layout.txt
+          head -n 10 /tmp/layout.txt
+          rm -rf /tmp/smoke && mkdir -p /tmp/smoke
+          tar -C /tmp/smoke -xzf "$ASSET"
+          test -d "/tmp/smoke/$PACKAGE_DIR" || { echo "顶层目录不是 $PACKAGE_DIR" >&2; exit 1; }
+          "/tmp/smoke/$PACKAGE_DIR/dbx" --help
+          file "/tmp/smoke/$PACKAGE_DIR/bin/dbx-web-bin"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dbx-web-linux-x64
-          path: out/
+          name: DBX-browser-static-${{ env.DBX_ARCH }}
+          path: |
+            DBX_*_${{ env.DBX_ARCH }}-browser-static.tar.gz
+            DBX_*_${{ env.DBX_ARCH }}-browser-static.tar.gz.sha256
           retention-days: 14
