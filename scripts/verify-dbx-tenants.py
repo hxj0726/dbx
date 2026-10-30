@@ -8,6 +8,8 @@
 只依赖标准库。逐项打印 PASS/FAIL，退出码非 0 表示有失败项。
 """
 
+from __future__ import annotations
+
 import base64
 import hashlib
 import hmac
