@@ -280,7 +280,13 @@ pub(crate) fn identity_from_headers(trust: &TrustConfig, headers: &HeaderMap) ->
     let role = header(identity::HEADER_ROLE).ok_or(IdentityError::MissingHeaders)?;
     let ts = header(identity::HEADER_TS).ok_or(IdentityError::MissingHeaders)?;
     let sig = header(identity::HEADER_SIG).ok_or(IdentityError::MissingHeaders)?;
-    trust.verify_parts(tenant, role, header(identity::HEADER_ACT_AS), ts, sig, identity::now_secs())
+    let now = identity::now_secs();
+    match header(identity::HEADER_NONCE) {
+        Some(nonce) => {
+            trust.verify_parts_with_nonce(tenant, role, header(identity::HEADER_ACT_AS), ts, sig, nonce, now)
+        }
+        None => trust.verify_parts(tenant, role, header(identity::HEADER_ACT_AS), ts, sig, now),
+    }
 }
 
 pub(crate) fn identity_error_response(error: IdentityError) -> Response {

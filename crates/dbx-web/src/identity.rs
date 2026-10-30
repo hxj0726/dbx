@@ -34,6 +34,8 @@ pub const HEADER_ROLE: &str = "x-dbx-role";
 pub const HEADER_ACT_AS: &str = "x-dbx-act-as";
 pub const HEADER_TS: &str = "x-dbx-ts";
 pub const HEADER_SIG: &str = "x-dbx-sig";
+/// 每次请求唯一的随机串，参与签名并作为重放检测的键。
+pub const HEADER_NONCE: &str = "x-dbx-nonce";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -150,6 +152,11 @@ impl TrustConfig {
         format!("{tenant}\n{}\n{act_as}\n{ts}", role.as_str())
     }
 
+    /// 带 nonce 的 canonical：末尾追加 nonce，使每次请求的签名互不相同。
+    pub fn canonical_with_nonce(tenant: &str, role: Role, act_as: &str, ts: u64, nonce: &str) -> String {
+        format!("{tenant}\n{}\n{act_as}\n{ts}\n{nonce}", role.as_str())
+    }
+
     pub(crate) fn sign(&self, canonical: &str) -> Vec<u8> {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.key).expect("HMAC 接受任意长度密钥");
         mac.update(canonical.as_bytes());
@@ -165,13 +172,14 @@ impl TrustConfig {
     }
 
     /// 校验一组头（已抽出，便于单测）。
-    pub fn verify_parts(
+    fn verify_signed(
         &self,
         tenant: &str,
         role: &str,
         act_as: Option<&str>,
         ts: &str,
         sig: &str,
+        nonce: Option<&str>,
         now: u64,
     ) -> Result<Identity, IdentityError> {
         let tenant = tenant.trim();
@@ -194,7 +202,15 @@ impl TrustConfig {
             }
         }
 
-        let canonical = Self::canonical(tenant, role, act_as.unwrap_or(""), ts_num);
+        if let Some(value) = nonce {
+            if value.is_empty() || value.len() > 128 || !value.bytes().all(|b| b.is_ascii_graphic()) {
+                return Err(IdentityError::BadSignature);
+            }
+        }
+        let canonical = match nonce {
+            Some(value) => Self::canonical_with_nonce(tenant, role, act_as.unwrap_or(""), ts_num, value),
+            None => Self::canonical(tenant, role, act_as.unwrap_or(""), ts_num),
+        };
         let expected = self.sign(&canonical);
         let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(sig.trim())
@@ -205,12 +221,44 @@ impl TrustConfig {
         mac.verify_slice(&provided).map_err(|_| IdentityError::BadSignature)?;
         debug_assert_eq!(expected.len(), provided.len());
 
-        self.check_replay(tenant, ts_num, now)?;
+        // 时间戳只有秒级精度，无法区分"同一秒内的并发请求"与重放：一个页面加载会在
+        // 同一秒内发出十几个请求，按 (tenant, ts) 判重会把它们全部误杀。因此重放检测
+        // 只对带 nonce 的请求启用；不带 nonce 的旧客户端退化为不做该检测。
+        if let Some(value) = nonce {
+            self.check_replay(value, now)?;
+        }
 
         Ok(Identity { tenant: tenant.to_string(), role, acted_as: act_as.map(str::to_string) })
     }
 
-    fn check_replay(&self, tenant: &str, ts: u64, now: u64) -> Result<(), IdentityError> {
+    /// 兼容入口：不带 nonce 的旧协议（不做重放检测，原因见 `verify_signed`）。
+    pub fn verify_parts(
+        &self,
+        tenant: &str,
+        role: &str,
+        act_as: Option<&str>,
+        ts: &str,
+        sig: &str,
+        now: u64,
+    ) -> Result<Identity, IdentityError> {
+        self.verify_signed(tenant, role, act_as, ts, sig, None, now)
+    }
+
+    /// 带 nonce 的验签：canonical 末尾追加 nonce，重放以 nonce 为键。
+    pub fn verify_parts_with_nonce(
+        &self,
+        tenant: &str,
+        role: &str,
+        act_as: Option<&str>,
+        ts: &str,
+        sig: &str,
+        nonce: &str,
+        now: u64,
+    ) -> Result<Identity, IdentityError> {
+        self.verify_signed(tenant, role, act_as, ts, sig, Some(nonce), now)
+    }
+
+    fn check_replay(&self, nonce: &str, now: u64) -> Result<(), IdentityError> {
         let mut seen = self.replay.lock().expect("replay 锁中毒");
         // 淘汰窗口之外的记录，窗口内重复即判重放。
         while let Some((_, stamp)) = seen.front() {
@@ -220,10 +268,10 @@ impl TrustConfig {
                 break;
             }
         }
-        if seen.iter().any(|(t, stamp)| t == tenant && *stamp == ts) {
+        if seen.iter().any(|(value, _)| value == nonce) {
             return Err(IdentityError::Replayed);
         }
-        seen.push_back((tenant.to_string(), ts));
+        seen.push_back((nonce.to_string(), now));
         while seen.len() > REPLAY_CAPACITY {
             seen.pop_front();
         }
@@ -350,8 +398,19 @@ mod tests {
             1_700_000_000,
         )));
         let cfg = config();
+        // 无 nonce 的旧协议不再判重放：秒级时间戳无法区分并发请求与重放。
         cfg.verify_parts("u-1", "member", None, "1700000000", &sig, 1_700_000_000).expect("首次通过");
-        let err = cfg.verify_parts("u-1", "member", None, "1700000000", &sig, 1_700_000_000).expect_err("重复应拒绝");
+        cfg.verify_parts("u-1", "member", None, "1700000000", &sig, 1_700_000_000).expect("同秒重复应放行");
+
+        // 带 nonce 时，重复的 nonce 仍判重放。
+        let nonce = "nonce-1";
+        let signed = TrustConfig::canonical_with_nonce("u-1", Role::Member, "", 1_700_000_000, nonce);
+        let sig_nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(config().sign(&signed));
+        cfg.verify_parts_with_nonce("u-1", "member", None, "1700000000", &sig_nonce, nonce, 1_700_000_000)
+            .expect("首次通过");
+        let err = cfg
+            .verify_parts_with_nonce("u-1", "member", None, "1700000000", &sig_nonce, nonce, 1_700_000_000)
+            .expect_err("同一 nonce 重复应拒绝");
         assert!(matches!(err, IdentityError::Replayed));
     }
 
