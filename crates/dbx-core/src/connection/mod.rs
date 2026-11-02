@@ -470,6 +470,9 @@ pub struct AppState {
     /// backup workers, stdio MCP, CLI) never fights it for the same port. Only
     /// the long-lived primary runtimes (desktop app, dbx-web server) turn it on.
     honor_fixed_ssh_local_ports: AtomicBool,
+    /// 多租户共享驱动目录时，连接失败回退不能在后台自动下载驱动/JRE：
+    /// 那会绕过 `/agents` 的管理员门禁，把成员操作写进进程级共享目录。
+    implicit_agent_install_enabled: AtomicBool,
     /// PostgreSQL TLS cancel context, keyed by pool_key.
     /// Used to reconstruct a TLS connector compatible with the original connection when cancelling.
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
@@ -2114,6 +2117,7 @@ impl AppState {
             duckdb_worker_process_isolation: AtomicBool::new(false),
             duckdb_worker_max_processes: AtomicUsize::new(DUCKDB_WORKER_MAX_PROCESSES_DEFAULT),
             honor_fixed_ssh_local_ports: AtomicBool::new(false),
+            implicit_agent_install_enabled: AtomicBool::new(true),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
             mysql_preserved_transactions: Arc::new(RwLock::new(HashSet::new())),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -2224,6 +2228,14 @@ impl AppState {
 
     pub fn set_honor_fixed_ssh_local_ports(&self, enabled: bool) {
         self.honor_fixed_ssh_local_ports.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn set_implicit_agent_install_enabled(&self, enabled: bool) {
+        self.implicit_agent_install_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn implicit_agent_install_enabled(&self) -> bool {
+        self.implicit_agent_install_enabled.load(Ordering::Relaxed)
     }
 
     pub fn set_duckdb_worker_max_processes(&self, max_processes: usize) {
@@ -3718,6 +3730,11 @@ impl AppState {
                         Err(e) => e,
                     };
                     if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
+                        if !self.implicit_agent_install_enabled() {
+                            return Err(format!(
+                                "{native_err}\n\nMongoDB (Legacy) fallback driver installation is disabled because the driver directory is shared between tenants; ask an administrator to install the MongoDB (Legacy) driver first."
+                            ));
+                        }
                         log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
                         let connect_params = serde_json::json!({ "connection": agent_connect_params(&db_config, &host, port, db_config.effective_database().unwrap_or(""))? });
                         let legacy_agent_key =
@@ -10900,6 +10917,15 @@ mod tests {
         assert!(!stamp.same_plan(&second));
         let probe = state.prepare_connection_transport(&format!("{}:test", config.id), &config).await.unwrap();
         assert!(matches!(probe.route, super::ConnectionTransportRoute::Static { fixed_local_port: None, .. }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn implicit_agent_install_can_be_disabled_for_shared_directories() {
+        let (state, dir) = test_app_state().await;
+        assert!(state.implicit_agent_install_enabled());
+        state.set_implicit_agent_install_enabled(false);
+        assert!(!state.implicit_agent_install_enabled());
         let _ = std::fs::remove_dir_all(dir);
     }
 

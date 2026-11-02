@@ -37,6 +37,8 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { enforceRightSidebarPanelExclusivity, RIGHT_SIDEBAR_PANEL_IDS, transitionRightSidebarPanels, useSettingsStore, type RightSidebarPanelId, type RightSidebarPanelState } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
+import { useWebIdentityStore } from "@/stores/webIdentityStore";
+import { sanitizeSettingsCategoryForRole } from "@/lib/settings/settingsAccess";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
@@ -286,6 +288,7 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const navigationStore = useNavigationStore();
 const settingsStore = useSettingsStore();
+const webIdentity = useWebIdentityStore();
 const { active: appBackgroundActive, backgroundObjectUrl: appBackgroundObjectUrl, backgroundImageStyle: appBackgroundImageStyle } = useBackgroundImage(settingsStore);
 const editorFontFamilyStyle = useEditorFontFamilyStyle();
 const { uiFontFamilyPreview } = useUiFontFamilyPreview();
@@ -1221,7 +1224,8 @@ const toolbarHasUpdateAvailable = computed(() =>
   }),
 );
 const showDriverStoreUpdateBadge = computed(() => driverStoreUpdateBadgeCount(settingsStore.editorSettings.autoUpdateDrivers, settingsStore.editorSettings.autoUpdateJdbc, toolbarDriverUpdateCount.value, toolbarJdbcUpdateAvailable.value));
-const showMcpSettingsUpdateBadge = computed(() => showMcpUpdateBadge(settingsStore.editorSettings.autoUpdateMcp, toolbarMcpUpdateAvailable.value));
+// 更新角标指向的是 MCP 公共配置，普通用户看不到该页，角标也不应出现。
+const showMcpSettingsUpdateBadge = computed(() => webIdentity.isAdmin && showMcpUpdateBadge(settingsStore.editorSettings.autoUpdateMcp, toolbarMcpUpdateAvailable.value));
 const manualCheckingAllUpdates = ref(false);
 const checkingAllUpdates = computed(() => manualCheckingAllUpdates.value || checkingUpdates.value || componentUpdates.loading.value);
 const updatingAllUpdates = ref(false);
@@ -1398,7 +1402,9 @@ function toggleTabBarCollapsed() {
 }
 
 function openSettings(initialTab = "appearance", initialSection?: string) {
-  settingsInitialTab.value = initialTab;
+  // 入口不止导航栏（工具栏、更新角标、事件、快捷键都可能直接传分类），
+  // 非管理员在这里也必须回落到他有权限的页面，否则会出现"导航里没有、内容却渲染"。
+  settingsInitialTab.value = sanitizeSettingsCategoryForRole(initialTab, webIdentity.isAdmin);
   settingsInitialSection.value = initialSection;
   settingsNavigationRequestId.value += 1;
   if (!settingsStore.settingsPageActive) {
@@ -1528,6 +1534,13 @@ function finishCloseSettingsPage() {
 const driverStoreFocus = ref<DriverStoreFocus | null>(null);
 
 function openDriverStorePage(target?: DriverStoreTab | DriverStoreFocus | null) {
+  // 驱动安装/卸载写的是进程级共享的驱动目录，属于多租户下的管理面。这里收口
+  // 所有入口：工具栏、命令菜单、`dbx-open-driver-store` 事件（侧栏驱动提示）、
+  // 连接对话框里的「驱动管理」链接，以及设置-更新页的按钮。
+  if (!webIdentity.isAdmin) {
+    toast(t("common.adminOnlyHint"), 4000);
+    return;
+  }
   if (typeof target === "string") {
     driverStoreActiveTab.value = target;
     driverStoreFocus.value = null;
@@ -1560,6 +1573,11 @@ function closeDriverStorePage() {
 }
 
 function openPluginCenterPage(focus?: PluginCenterFocus | null) {
+  // 插件安装/卸载与驱动同类：普通用户只读，配置入口只给管理员。
+  if (!webIdentity.isAdmin) {
+    toast(t("common.adminOnlyHint"), 4000);
+    return;
+  }
   pluginCenterFocus.value = focus ?? null;
   pluginCenterTabOpen.value = true;
   activateMainContentSurface("pluginCenter");
@@ -5468,7 +5486,6 @@ onUnmounted(() => {
           @toggle-history="toggleRightSidebarPanel('history')"
           @toggle-sql-library="toggleRightSidebarPanel('sqlLibrary')"
           @toggle-sql-file-panel="toggleRightSidebarPanel('sqlFile')"
-          @open-github="openGitHub"
           @open-settings="openSettings(showMcpSettingsUpdateBadge ? 'mcp' : 'appearance')"
           @open-driver-store="openDriverStorePage"
           @open-plugin-center="openPluginCenterPage()"

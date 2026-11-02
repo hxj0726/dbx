@@ -234,6 +234,8 @@ Set `DBX_WEB_URL` to use a deployed DBX Web backend instead of local desktop sto
 
 `DBX_WEB_PASSWORD` is the password used on the DBX Web login page. Desktop-local mode does not use it. Desktop UI tools are hidden in Web mode.
 
+When a trusted reverse proxy in front of DBX Web owns authentication (for example next-tdc), `DBX_WEB_PASSWORD` is not used. Put the credential the proxy expects into `DBX_WEB_HEADERS` instead, e.g. `{"X-API-Key":"tdc_..."}`; requests are then authenticated and scoped by the proxy. See section 11 of [`docs/DBX-EMBED.md`](../../docs/DBX-EMBED.md).
+
 DBX Web requests honor the standard system proxy environment variables (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`, bypass via `NO_PROXY`); an empty value means no proxy. Proxies requiring authentication use the `http://user:pass@host:port` URL form. Extra headers can be attached via `DBX_WEB_HEADERS` (a JSON object, e.g. `{"Authorization":"Bearer <token>"}`) — applied to every request, including authentication. For self-signed HTTPS backends, set `DBX_WEB_INSECURE_SKIP_VERIFY=1` to skip certificate verification, or `DBX_WEB_CA_CERT` to trust a private CA (verification is on by default).
 
 Docker and DBX Web also require the standalone DuckDB driver. Install it from Driver Manager after the first launch; when `/app/data` is persisted, the driver is stored under `/app/data/agents` and survives container upgrades.
@@ -336,10 +338,10 @@ SQL text is not included in normal MCP errors or logged by default. Enable tempo
 | `DBX_DATA_DIR` | Override the local DBX data directory |
 | `DBX_SESSION_IDLE_TTL_SECS` | Stateful session idle timeout in positive whole seconds (default: `1800`). Invalid, zero, negative or unrepresentable values use the default. Applies to transaction-owned connections too; restart the MCP host after changing it. |
 | `DBX_WEB_URL` | Use a DBX Web/Docker backend |
-| `DBX_WEB_PASSWORD` | Authenticate to the DBX Web backend |
+| `DBX_WEB_PASSWORD` | Authenticate to a DBX Web backend that owns its login page |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | Standard system proxy variables for DBX Web requests; empty value means no proxy. Auth via `http://user:pass@host:port` |
 | `NO_PROXY` | Standard comma-separated bypass list for the proxy above |
-| `DBX_WEB_HEADERS` | JSON object of extra HTTP headers for DBX Web requests, e.g. `{"Authorization":"Bearer token"}` |
+| `DBX_WEB_HEADERS` | JSON object of extra HTTP headers for DBX Web requests, e.g. `{"Authorization":"Bearer token"}` or `{"X-API-Key":"tdc_..."}` |
 | `DBX_WEB_INSECURE_SKIP_VERIFY` | `1`/`true` disables TLS certificate verification for self-signed backends |
 | `DBX_WEB_CA_CERT` | PEM/DER CA file to trust for DBX Web TLS verification |
 | `DBX_WEB_MCP_TOKEN` | Enable native DBX Web Streamable HTTP MCP with this bearer token |
@@ -612,6 +614,10 @@ Resource 的发现和读取会复用对应 Tool 的白名单，以及连接、�
 
 Web 模式不会读取本机 DBX 桌面存储，也不会暴露桌面 UI 工具。
 
+如果 DBX Web 前面还有一层可信代理（例如 next-tdc）负责登录，`DBX_WEB_PASSWORD` 不适用；
+把代理要求的凭证放进 `DBX_WEB_HEADERS`，例如 `{"X-API-Key":"tdc_..."}`，请求会由代理解析身份并按用户隔离。
+详见 [`docs/DBX-EMBED.md`](../../docs/DBX-EMBED.md) 第 11 节。
+
 DBX Web 请求遵循标准系统代理环境变量：https 地址读取 `HTTPS_PROXY`/`https_proxy`，http 地址读取 `HTTP_PROXY`/`http_proxy`，`ALL_PROXY`/`all_proxy` 作为兜底，`NO_PROXY`/`no_proxy` 作为绕过列表。代理值为空或未设置时直连（不走代理）。需要认证的代理使用标准 `user:password@host:port` URL 形式，例如 `http://admin:admin123@127.0.0.1:7890`。如需为每次 DBX Web 请求附加自定义请求头（例如网关前的令牌认证），将 `DBX_WEB_HEADERS` 设置为 JSON 对象，键为请求头名称、值为字符串，例如 `{"Authorization":"Bearer <token>"}`，该头会附加到包括认证在内的每个请求。
 
 ### 原生 Streamable HTTP
@@ -699,10 +705,10 @@ MongoDB 更新和删除在未启用完全访问时必须提供可验证有效的
 | `DBX_DATA_DIR` | 覆盖本地 DBX 数据目录 |
 | `DBX_SESSION_IDLE_TTL_SECS` | 有状态会话空闲超时，单位为正整数秒，默认 `1800`。非法值、零、负数或无法表示的时长回退默认值；同样适用于事务专属连接。修改后需重启 MCP 宿主进程。 |
 | `DBX_WEB_URL` | 使用 DBX Web/Docker 后端 |
-| `DBX_WEB_PASSWORD` | DBX Web 登录密码 |
+| `DBX_WEB_PASSWORD` | 仅当 dbx-web 自己有登录页时使用 |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | DBX Web 请求的标准系统代理变量；空值表示不走代理。认证格式 `http://user:pass@host:port` |
 | `NO_PROXY` | 上述代理的标准逗号分隔绕过列表 |
-| `DBX_WEB_HEADERS` | DBX Web 请求附加的请求头 JSON 对象，例如 `{"Authorization":"Bearer token"}` |
+| `DBX_WEB_HEADERS` | DBX Web 请求附加的请求头 JSON 对象，例如 `{"Authorization":"Bearer token"}` 或 `{"X-API-Key":"tdc_..."}` |
 | `DBX_WEB_INSECURE_SKIP_VERIFY` | `1`/`true` 时跳过 TLS 证书验证（用于自签名后端） |
 | `DBX_WEB_CA_CERT` | DBX Web TLS 验证时信任的 PEM/DER CA 文件 |
 | `DBX_WEB_MCP_TOKEN` | 使用该 Bearer Token 启用原生 DBX Web Streamable HTTP MCP |

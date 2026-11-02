@@ -26,7 +26,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use dbx_core::connection::AppState;
-use dbx_mcp::{streamable_http_router, DbxBackend, LocalBackend};
+use dbx_mcp::{streamable_http_router, DbxBackend, HttpAuth, LocalBackend};
 use state::WebState;
 use std::sync::atomic::Ordering;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
@@ -405,11 +405,49 @@ fn mount_static_assets(mut app: Router, public_base_path: &str, source: Option<S
 /// without restarting the Web process; the shared auth middleware returns 404
 /// until a token is configured.
 fn web_mcp_router(web_state: &Arc<WebState>) -> Result<Router, String> {
-    let auth = web_state.web_mcp.auth();
+    web_mcp_router_with_auth(
+        web_state,
+        web_state.web_mcp.auth(),
+        web_state.web_mcp.allowed_hosts(),
+    )
+}
+
+fn web_mcp_router_with_auth(
+    web_state: &Arc<WebState>,
+    auth: HttpAuth,
+    allowed_hosts: Vec<String>,
+) -> Result<Router, String> {
     let backend: Arc<dyn DbxBackend> =
         Arc::new(LocalBackend::from_app_state(web_state.app.clone(), web_state.data_dir.clone()));
 
-    streamable_http_router(backend, "/mcp", auth, web_state.web_mcp.allowed_hosts(), true)
+    streamable_http_router(backend, "/mcp", auth, allowed_hosts, true)
+}
+
+/// 每个租户一副 MCP Router。外部鉴权由 next-tdc 的 `/dbx` 反代完成，这里只
+/// 用随机内部 Bearer 把请求交给租户自己的 `LocalBackend`；每个租户有独立的
+/// `McpSessionStore`，会话、策略、查询历史都落在该租户的 `dbx.db` 上。
+pub(crate) fn tenant_mcp_router(web_state: &Arc<WebState>, token: &str) -> Result<Router, String> {
+    let auth = HttpAuth::new_with_hosts(
+        Some(token.to_string()),
+        Vec::<String>::new(),
+        tenant_mcp_allowed_origins(),
+        false,
+    )?;
+    web_mcp_router_with_auth(web_state, auth, Vec::<String>::new())
+}
+
+fn tenant_mcp_allowed_origins() -> Vec<String> {
+    std::env::var("DBX_WEB_MCP_ALLOWED_ORIGINS")
+        .ok()
+        .map(|values| {
+            values
+                .split([',', '\n'])
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(feature = "mq-admin")]
@@ -1499,19 +1537,28 @@ async fn serve() -> Result<(), String> {
     // 受信任反代模式下，同一个进程要服务多个租户：每个租户各自装配 WebState 与
     // api_router，请求按签名头分发过去（见 dispatch.rs）。未配置反代时沿用单租户，
     // 行为与改造前完全一致。
-    let api = if let Some(trust) = web_state.trust.clone() {
+    let tenancy = if let Some(trust) = web_state.trust.clone() {
         tracing::info!("受信任反代模式：按签名头分发到各租户");
-        let registry = crate::tenant::TenantRegistry::new(
+        let registry = Arc::new(crate::tenant::TenantRegistry::new(
             web_state.data_dir.join("tenants"),
             web_state.public_base_path.clone(),
             crate::tenant::cap_from_env(),
             crate::tenant::idle_from_env(),
-        );
-        let dispatch_state = Arc::new(dispatch::DispatchState { registry, trust });
-        dispatch::spawn_tenant_reaper(dispatch_state.clone());
-        dispatch::dispatcher_router(dispatch_state)
+        ));
+        // `/api` 和 `/mcp` 共用同一份注册表：一个租户只装配一套 AppState。
+        dispatch::spawn_tenant_reaper(registry.clone());
+        Some((registry, trust))
     } else {
-        api_router(web_state.clone())
+        None
+    };
+
+    let api = match &tenancy {
+        Some((registry, trust)) => {
+            let dispatch_state =
+                Arc::new(dispatch::DispatchState { registry: registry.clone(), trust: trust.clone() });
+            dispatch::dispatcher_router(dispatch_state)
+        }
+        None => api_router(web_state.clone()),
     };
 
     // Build app
@@ -1521,7 +1568,16 @@ async fn serve() -> Result<(), String> {
         .layer(CompressionLayer::new().compress_when(web_compression_predicate()))
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
-    let mcp_router = web_mcp_router(&web_state).map_err(web_mcp_startup_error)?;
+    let mcp_router = match &tenancy {
+        Some((registry, trust)) => {
+            tracing::info!("MCP 多租户模式：/mcp 按签名头分发到各租户");
+            dispatch::mcp_dispatcher_router(Arc::new(dispatch::McpDispatchState {
+                registry: registry.clone(),
+                trust: trust.clone(),
+            }))
+        }
+        None => web_mcp_router(&web_state).map_err(web_mcp_startup_error)?,
+    };
     app = app.merge(
         mcp_router
             .layer(middleware::from_fn_with_state(web_state.clone(), web_mcp_demo_gate))

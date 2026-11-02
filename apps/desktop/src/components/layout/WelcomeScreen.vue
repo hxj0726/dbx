@@ -7,6 +7,7 @@ import AppLogo from "@/components/icons/AppLogo.vue";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import { connectionDriverLabel, connectionIconType, connectionRedactedNameLabel, connectionRedactedOptionSubtitle } from "@/lib/connection/connectionPresentation";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type { WelcomePageMode } from "@/stores/settingsStore";
 import type { ConnectionConfig } from "@/types/database";
 
@@ -44,6 +45,9 @@ const emit = defineEmits<{
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis";
 
 const { t } = useI18n();
+// Web 控制台只提供 HTTP MCP（入口在设置里），不再提示本地 stdio 的 npx 命令。
+const isWeb = !isTauriRuntime();
+const showMcpIntegrationHint = computed(() => !isWeb);
 
 const importSourceItems = computed(() => [
   { value: "dbx", label: t("sidebar.importDbx") },
@@ -236,8 +240,8 @@ function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
         </div>
       </div>
 
-      <!-- MCP Integration Hint -->
-      <div class="min-w-0 overflow-hidden rounded-lg border bg-muted/10 px-5 py-4">
+      <!-- MCP Integration Hint (桌面端本地 stdio；Web 只保留设置里的 HTTP 接入) -->
+      <div v-if="showMcpIntegrationHint" class="min-w-0 overflow-hidden rounded-lg border bg-muted/10 px-5 py-4">
         <div class="flex min-w-0 items-start gap-3">
           <Sparkles class="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
           <div class="min-w-0 flex-1">
@@ -251,13 +255,6 @@ function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
             </div>
           </div>
         </div>
-      </div>
-
-      <!-- Project Info -->
-      <div class="mt-2 flex items-center justify-center gap-3 text-[11px] text-muted-foreground/60">
-        <span>DBX {{ appVersion ? "v" + appVersion : "" }}</span>
-        <span>·</span>
-        <a href="#" class="hover:text-foreground transition-colors" @click.prevent="emit('open-github')">GitHub</a>
       </div>
     </div>
   </div>

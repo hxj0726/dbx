@@ -1031,6 +1031,8 @@ export interface McpHttpServerStatus {
 export interface WebMcpHttpStatus {
   enabled: boolean;
   endpointPath: string;
+  /** 受信任反代模式下 /mcp 按 TDC API Key 签发的租户身份分发 */
+  tenantMode: boolean;
   tokenSource: "environment" | "file" | "managed" | null;
   allowedHosts: string[];
   allowedOrigins: string[];
@@ -1066,7 +1068,7 @@ export async function rotateMcpHttpServerToken(): Promise<McpHttpServerStatus> {
 }
 
 export async function loadWebMcpHttpStatus(): Promise<WebMcpHttpStatus> {
-  return { enabled: false, endpointPath: "/mcp", tokenSource: null, allowedHosts: [], allowedOrigins: [], deploymentManaged: false, managementAvailable: false, accessToken: null };
+  return { enabled: false, endpointPath: "/mcp", tenantMode: false, tokenSource: null, allowedHosts: [], allowedOrigins: [], deploymentManaged: false, managementAvailable: false, accessToken: null };
 }
 
 export async function saveWebMcpHttpSettings(_settings: WebMcpHttpSettings): Promise<WebMcpHttpStatus> {

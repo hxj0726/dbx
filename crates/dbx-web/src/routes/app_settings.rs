@@ -223,15 +223,7 @@ pub async fn load_web_capabilities(State(state): State<Arc<WebState>>) -> Json<W
 }
 
 pub async fn load_web_mcp_http_status(State(state): State<Arc<WebState>>) -> impl IntoResponse {
-    let endpoint_path =
-        if state.public_base_path == "/" { "/mcp".to_string() } else { format!("{}/mcp", state.public_base_path) };
-    let management_available =
-        !state.password_disabled && state.password_hash.read().await.is_some() && !state.demo_mode;
-    let mut status = state.web_mcp.status(endpoint_path, management_available);
-    if state.demo_mode {
-        status.enabled = false;
-    }
-    web_mcp_status_response(status)
+    web_mcp_status_response(web_mcp_status(&state).await)
 }
 
 pub async fn save_web_mcp_http_settings(
@@ -241,9 +233,7 @@ pub async fn save_web_mcp_http_settings(
 ) -> Result<impl IntoResponse, AppError> {
     ensure_web_mcp_management_allowed(&state, &headers).await?;
     state.web_mcp.update(&state.app.storage, request).await.map_err(AppError::bad_request)?;
-    let endpoint_path =
-        if state.public_base_path == "/" { "/mcp".to_string() } else { format!("{}/mcp", state.public_base_path) };
-    Ok(web_mcp_status_response(state.web_mcp.status(endpoint_path, true)))
+    Ok(web_mcp_status_response(web_mcp_status(&state).await))
 }
 
 pub async fn rotate_web_mcp_token(
@@ -252,9 +242,21 @@ pub async fn rotate_web_mcp_token(
 ) -> Result<impl IntoResponse, AppError> {
     ensure_web_mcp_management_allowed(&state, &headers).await?;
     state.web_mcp.rotate(&state.app.storage).await.map_err(AppError::bad_request)?;
+    Ok(web_mcp_status_response(web_mcp_status(&state).await))
+}
+
+async fn web_mcp_status(state: &WebState) -> WebMcpHttpStatus {
     let endpoint_path =
         if state.public_base_path == "/" { "/mcp".to_string() } else { format!("{}/mcp", state.public_base_path) };
-    Ok(web_mcp_status_response(state.web_mcp.status(endpoint_path, true)))
+    let management_available =
+        !state.password_disabled && state.password_hash.read().await.is_some() && !state.demo_mode;
+    // trust 模式下 /mcp 由 next-tdc 的 /dbx 反代按 API Key 签发租户身份，
+    // 页面应展示多租户 API Key 接入，而不是旧的 Web MCP Token 管理。
+    let mut status = state.web_mcp.status(endpoint_path, management_available, state.trust.is_some());
+    if state.demo_mode {
+        status.enabled = false;
+    }
+    status
 }
 
 fn web_mcp_status_response(status: WebMcpHttpStatus) -> impl IntoResponse {

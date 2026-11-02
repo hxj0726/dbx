@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "dbx": {
+      "type": "http",
+      "url": "http://<TDC_HOST>:3000/dbx/mcp",
+      "headers": {
+        "X-API-Key": "<tdc_api_token>"
+      }
+    }
+  }
+}

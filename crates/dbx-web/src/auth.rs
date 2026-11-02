@@ -280,7 +280,13 @@ pub(crate) fn identity_from_headers(trust: &TrustConfig, headers: &HeaderMap) ->
     let role = header(identity::HEADER_ROLE).ok_or(IdentityError::MissingHeaders)?;
     let ts = header(identity::HEADER_TS).ok_or(IdentityError::MissingHeaders)?;
     let sig = header(identity::HEADER_SIG).ok_or(IdentityError::MissingHeaders)?;
-    trust.verify_parts(tenant, role, header(identity::HEADER_ACT_AS), ts, sig, identity::now_secs())
+    let now = identity::now_secs();
+    match header(identity::HEADER_NONCE) {
+        Some(nonce) => {
+            trust.verify_parts_with_nonce(tenant, role, header(identity::HEADER_ACT_AS), ts, sig, nonce, now)
+        }
+        None => trust.verify_parts(tenant, role, header(identity::HEADER_ACT_AS), ts, sig, now),
+    }
 }
 
 pub(crate) fn identity_error_response(error: IdentityError) -> Response {
@@ -311,7 +317,8 @@ pub async fn auth_middleware(
             },
         };
         let suffix = middleware_api_path_suffix(&path, &state.public_base_path);
-        if !identity.role.is_admin() && suffix.is_some_and(identity::is_admin_only_path) {
+        let admin_only = suffix.is_some_and(|suffix| identity::is_admin_only_request(req.method(), suffix));
+        if !identity.role.is_admin() && admin_only {
             return (StatusCode::FORBIDDEN, "该模块仅管理员可操作").into_response();
         }
         if identity.is_acting_as() {
@@ -363,6 +370,31 @@ pub async fn auth_middleware(
 #[cfg(test)]
 mod tests {
     use super::{api_path_suffix, middleware_api_path_suffix};
+    use crate::identity;
+    use axum::http::Method;
+
+    /// 门禁真正收到的是 `middleware_api_path_suffix` 的返回值（不带前导 `/`）。
+    /// 历史上只测了带 `/` 的纯函数，导致两条归一化规则脱节、所有 403 静默失效。
+    #[test]
+    fn middleware_suffixes_reach_admin_gating() {
+        let suffix = middleware_api_path_suffix("/api/agents/install", "/").unwrap();
+        assert_eq!(suffix, "agents/install");
+        assert!(identity::is_admin_only_request(&Method::POST, suffix));
+
+        let suffix = middleware_api_path_suffix("/api/system/fonts", "/").unwrap();
+        assert_eq!(suffix, "system/fonts");
+        assert!(!identity::is_admin_only_request(&Method::GET, suffix));
+        assert!(identity::is_admin_only_request(&Method::POST, suffix));
+
+        let suffix = middleware_api_path_suffix("/api/app-settings/mcp-policy", "/").unwrap();
+        assert!(identity::is_admin_only_request(&Method::GET, suffix));
+
+        let suffix = middleware_api_path_suffix("/dbx/api/plugins/install", "/dbx").unwrap();
+        assert!(identity::is_admin_only_request(&Method::POST, suffix));
+
+        let suffix = middleware_api_path_suffix("/plugins/install", "/").unwrap();
+        assert!(identity::is_admin_only_request(&Method::POST, suffix));
+    }
 
     #[test]
     fn api_path_suffix_handles_root_api_paths() {

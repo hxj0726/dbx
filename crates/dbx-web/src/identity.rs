@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::http::Method;
 use base64::Engine as _;
 use pbkdf2::hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,8 @@ pub const HEADER_ROLE: &str = "x-dbx-role";
 pub const HEADER_ACT_AS: &str = "x-dbx-act-as";
 pub const HEADER_TS: &str = "x-dbx-ts";
 pub const HEADER_SIG: &str = "x-dbx-sig";
+/// 每次请求唯一的随机串，参与签名并作为重放检测的键。
+pub const HEADER_NONCE: &str = "x-dbx-nonce";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -150,6 +153,11 @@ impl TrustConfig {
         format!("{tenant}\n{}\n{act_as}\n{ts}", role.as_str())
     }
 
+    /// 带 nonce 的 canonical：末尾追加 nonce，使每次请求的签名互不相同。
+    pub fn canonical_with_nonce(tenant: &str, role: Role, act_as: &str, ts: u64, nonce: &str) -> String {
+        format!("{tenant}\n{}\n{act_as}\n{ts}\n{nonce}", role.as_str())
+    }
+
     pub(crate) fn sign(&self, canonical: &str) -> Vec<u8> {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.key).expect("HMAC 接受任意长度密钥");
         mac.update(canonical.as_bytes());
@@ -165,13 +173,14 @@ impl TrustConfig {
     }
 
     /// 校验一组头（已抽出，便于单测）。
-    pub fn verify_parts(
+    fn verify_signed(
         &self,
         tenant: &str,
         role: &str,
         act_as: Option<&str>,
         ts: &str,
         sig: &str,
+        nonce: Option<&str>,
         now: u64,
     ) -> Result<Identity, IdentityError> {
         let tenant = tenant.trim();
@@ -194,7 +203,15 @@ impl TrustConfig {
             }
         }
 
-        let canonical = Self::canonical(tenant, role, act_as.unwrap_or(""), ts_num);
+        if let Some(value) = nonce {
+            if value.is_empty() || value.len() > 128 || !value.bytes().all(|b| b.is_ascii_graphic()) {
+                return Err(IdentityError::BadSignature);
+            }
+        }
+        let canonical = match nonce {
+            Some(value) => Self::canonical_with_nonce(tenant, role, act_as.unwrap_or(""), ts_num, value),
+            None => Self::canonical(tenant, role, act_as.unwrap_or(""), ts_num),
+        };
         let expected = self.sign(&canonical);
         let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(sig.trim())
@@ -205,12 +222,44 @@ impl TrustConfig {
         mac.verify_slice(&provided).map_err(|_| IdentityError::BadSignature)?;
         debug_assert_eq!(expected.len(), provided.len());
 
-        self.check_replay(tenant, ts_num, now)?;
+        // 时间戳只有秒级精度，无法区分"同一秒内的并发请求"与重放：一个页面加载会在
+        // 同一秒内发出十几个请求，按 (tenant, ts) 判重会把它们全部误杀。因此重放检测
+        // 只对带 nonce 的请求启用；不带 nonce 的旧客户端退化为不做该检测。
+        if let Some(value) = nonce {
+            self.check_replay(value, now)?;
+        }
 
         Ok(Identity { tenant: tenant.to_string(), role, acted_as: act_as.map(str::to_string) })
     }
 
-    fn check_replay(&self, tenant: &str, ts: u64, now: u64) -> Result<(), IdentityError> {
+    /// 兼容入口：不带 nonce 的旧协议（不做重放检测，原因见 `verify_signed`）。
+    pub fn verify_parts(
+        &self,
+        tenant: &str,
+        role: &str,
+        act_as: Option<&str>,
+        ts: &str,
+        sig: &str,
+        now: u64,
+    ) -> Result<Identity, IdentityError> {
+        self.verify_signed(tenant, role, act_as, ts, sig, None, now)
+    }
+
+    /// 带 nonce 的验签：canonical 末尾追加 nonce，重放以 nonce 为键。
+    pub fn verify_parts_with_nonce(
+        &self,
+        tenant: &str,
+        role: &str,
+        act_as: Option<&str>,
+        ts: &str,
+        sig: &str,
+        nonce: &str,
+        now: u64,
+    ) -> Result<Identity, IdentityError> {
+        self.verify_signed(tenant, role, act_as, ts, sig, Some(nonce), now)
+    }
+
+    fn check_replay(&self, nonce: &str, now: u64) -> Result<(), IdentityError> {
         let mut seen = self.replay.lock().expect("replay 锁中毒");
         // 淘汰窗口之外的记录，窗口内重复即判重放。
         while let Some((_, stamp)) = seen.front() {
@@ -220,10 +269,10 @@ impl TrustConfig {
                 break;
             }
         }
-        if seen.iter().any(|(t, stamp)| t == tenant && *stamp == ts) {
+        if seen.iter().any(|(value, _)| value == nonce) {
             return Err(IdentityError::Replayed);
         }
-        seen.push_back((tenant.to_string(), ts));
+        seen.push_back((nonce.to_string(), now));
         while seen.len() > REPLAY_CAPACITY {
             seen.pop_front();
         }
@@ -265,13 +314,77 @@ pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// 仅管理员可访问的接口前缀（相对 `/api`，不含 base path）。
-pub const ADMIN_ONLY_PREFIXES: &[&str] =
-    &["/mcp", "/system", "/tenants", "/plugins/install-url", "/plugins/marketplace/install"];
+/// 仅管理员可访问的接口前缀（相对 `/api`，不含 base path），所有方法都拦。
+pub const ADMIN_ONLY_PREFIXES: &[&str] = &[
+    "/mcp",
+    "/system",
+    "/tenants",
+    "/plugins/install",
+    "/plugins/uninstall",
+    "/plugins/rollback",
+    "/plugins/trusted-keys",
+    "/plugins/repositories",
+    "/plugins/marketplace/install",
+    // MCP 公共配置：策略、访问策略、插件授权、HTTP 凭证与历史保留都只属于管理面。
+    // 每个前缀都按段匹配；`/app-settings/mcp-http` 不会覆盖 `mcp-http-status`。
+    "/app-settings/mcp-policy",
+    "/app-settings/mcp-tool-catalog",
+    "/app-settings/mcp-access-policy",
+    "/app-settings/plugin-mcp",
+    "/app-settings/mcp-http-status",
+    "/app-settings/mcp-http",
+    "/app-settings/mcp-history-retention-limit",
+    "/app-settings/mcp-history-retention-cleanup",
+];
+
+/// 路径级名单里允许普通用户只读的精确例外。系统字体枚举只返回字体名，
+/// 设置、连接对话框和数据网格都要用它；拦掉会让普通用户的字体列表静默变空。
+/// 只放行只读方法，`/system` 下其他路径仍按列表全拦。
+const ADMIN_ONLY_READ_EXCEPTIONS: &[&str] = &["/system/fonts"];
+
+/// 这些前缀下只有写操作属于管理面，读接口普通用户仍然要用：
+/// 连接对话框靠它们判断"这根驱动装没装"、JDBC 面板靠它们列出已导入的 JAR。
+/// 拦掉读接口会让普通用户看到"驱动未安装"却无从判断，属于误伤。
+pub const ADMIN_ONLY_WRITE_PREFIXES: &[&str] = &["/agents", "/jdbc"];
+
+/// 中间件传进来的路径来自两层归一化：`/api/...` 剥掉 `/api/`，nest 后
+/// 的路径剥掉前导 `/`。两者都不带头斜杠，而名单为了可读性写了 `/mcp`。
+/// 匹配时前缀名单只忽略前导 `/`，精确名单再忽略首尾 `/`；这样名单写成
+/// 哪种形式都能命中，避免“名单看着对、实际永远不命中”的静默失效。
+fn matches_prefix(path: &str, prefixes: &[&str]) -> bool {
+    let path = path.trim_start_matches('/');
+    prefixes.iter().any(|prefix| {
+        let prefix = prefix.trim_start_matches('/');
+        path == prefix || path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+fn matches_exact(path: &str, values: &[&str]) -> bool {
+    let path = path.trim_matches('/');
+    values.iter().any(|value| path == value.trim_matches('/'))
+}
 
 /// 判断某个 API 路径是否属于全局配置（非管理员 403）。
 pub fn is_admin_only_path(path: &str) -> bool {
-    ADMIN_ONLY_PREFIXES.iter().any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+    matches_prefix(path, ADMIN_ONLY_PREFIXES)
+}
+
+/// 判断某个请求是否属于管理面：路径级前缀全拦，写前缀只拦非只读方法。
+///
+/// 驱动与插件的安装/卸载/升级会改进程级共享状态（共享驱动目录、插件目录），
+/// 因此不能只靠前端隐藏入口；普通用户绕过界面直接调接口同样要 403。
+pub fn is_admin_only_request(method: &Method, path: &str) -> bool {
+    let read_only = matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS);
+    if read_only && matches_exact(path, ADMIN_ONLY_READ_EXCEPTIONS) {
+        return false;
+    }
+    if is_admin_only_path(path) {
+        return true;
+    }
+    if read_only {
+        return false;
+    }
+    matches_prefix(path, ADMIN_ONLY_WRITE_PREFIXES)
 }
 
 #[cfg(test)]
@@ -350,8 +463,19 @@ mod tests {
             1_700_000_000,
         )));
         let cfg = config();
+        // 无 nonce 的旧协议不再判重放：秒级时间戳无法区分并发请求与重放。
         cfg.verify_parts("u-1", "member", None, "1700000000", &sig, 1_700_000_000).expect("首次通过");
-        let err = cfg.verify_parts("u-1", "member", None, "1700000000", &sig, 1_700_000_000).expect_err("重复应拒绝");
+        cfg.verify_parts("u-1", "member", None, "1700000000", &sig, 1_700_000_000).expect("同秒重复应放行");
+
+        // 带 nonce 时，重复的 nonce 仍判重放。
+        let nonce = "nonce-1";
+        let signed = TrustConfig::canonical_with_nonce("u-1", Role::Member, "", 1_700_000_000, nonce);
+        let sig_nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(config().sign(&signed));
+        cfg.verify_parts_with_nonce("u-1", "member", None, "1700000000", &sig_nonce, nonce, 1_700_000_000)
+            .expect("首次通过");
+        let err = cfg
+            .verify_parts_with_nonce("u-1", "member", None, "1700000000", &sig_nonce, nonce, 1_700_000_000)
+            .expect_err("同一 nonce 重复应拒绝");
         assert!(matches!(err, IdentityError::Replayed));
     }
 
@@ -368,7 +492,100 @@ mod tests {
         assert!(is_admin_only_path("/mcp"));
         assert!(is_admin_only_path("/mcp/tools"));
         assert!(is_admin_only_path("/system/info"));
+        assert!(is_admin_only_path("/plugins/install"));
+        assert!(is_admin_only_path("/plugins/repositories/save"));
+        assert!(is_admin_only_path("/app-settings/mcp-policy"));
+        assert!(is_admin_only_path("/app-settings/plugin-mcp/grant"));
         assert!(!is_admin_only_path("/mcpfoo"));
         assert!(!is_admin_only_path("/connections"));
+        assert!(!is_admin_only_path("/plugins"));
+        assert!(!is_admin_only_path("/agents/install"), "驱动安装属于写前缀，不在路径级名单");
+    }
+
+    /// 中间件传给门禁的是不带前导 `/` 的后缀；名单却按可读性写了 `/mcp`。
+    /// 两种写法必须等价，否则整套角色门禁会静默失效。
+    #[test]
+    fn prefix_matching_ignores_leading_slash() {
+        assert!(is_admin_only_path("mcp"));
+        assert!(is_admin_only_path("mcp/tools"));
+        assert!(is_admin_only_request(&Method::POST, "agents/install"));
+        assert!(is_admin_only_request(&Method::POST, "plugins/install"));
+        assert!(is_admin_only_request(&Method::GET, "app-settings/mcp-policy"));
+        assert!(!is_admin_only_path("mcpfoo"));
+    }
+
+    /// 系统字体是普通用户只读的精确例外；同一前缀下的其他路径和写方法仍拦截。
+    #[test]
+    fn system_fonts_is_member_readable_but_not_mutable() {
+        assert!(!is_admin_only_request(&Method::GET, "/system/fonts"));
+        assert!(!is_admin_only_request(&Method::HEAD, "system/fonts"));
+        assert!(!is_admin_only_request(&Method::OPTIONS, "/system/fonts/"));
+        assert!(is_admin_only_request(&Method::POST, "/system/fonts"));
+        assert!(is_admin_only_request(&Method::GET, "/system/info"));
+        assert!(is_admin_only_request(&Method::GET, "system"));
+    }
+
+    /// MCP 公共配置接口对所有方法都是管理面，包括 GET。
+    #[test]
+    fn mcp_app_settings_are_admin_only_for_every_method() {
+        for method in [Method::GET, Method::PUT, Method::POST, Method::DELETE] {
+            for path in [
+                "/app-settings/mcp-policy",
+                "/app-settings/mcp-tool-catalog",
+                "/app-settings/mcp-access-policy",
+                "/app-settings/mcp-access-policy/recover",
+                "/app-settings/plugin-mcp",
+                "/app-settings/plugin-mcp/scopes",
+                "/app-settings/mcp-http-status",
+                "/app-settings/mcp-http",
+                "/app-settings/mcp-http/rotate-token",
+                "/app-settings/mcp-history-retention-limit",
+                "/app-settings/mcp-history-retention-cleanup",
+            ] {
+                assert!(is_admin_only_request(&method, path), "{method} {path}");
+                assert!(is_admin_only_request(&method, path.trim_start_matches('/')), "{method} {path}");
+            }
+        }
+        assert!(!is_admin_only_request(&Method::GET, "/app-settings/theme"));
+    }
+
+    /// 驱动/插件的读接口必须留给普通用户：连接对话框靠它们判断驱动是否已安装。
+    #[test]
+    fn allows_member_reads_but_blocks_writes_on_driver_surfaces() {
+        assert!(!is_admin_only_request(&Method::GET, "/agents/installed"));
+        assert!(!is_admin_only_request(&Method::GET, "/agents/installed/oracle"));
+        assert!(!is_admin_only_request(&Method::GET, "/agents/storage-usage"));
+        assert!(!is_admin_only_request(&Method::GET, "/jdbc/drivers"));
+        assert!(!is_admin_only_request(&Method::HEAD, "/agents/installed"));
+        assert!(!is_admin_only_request(&Method::OPTIONS, "/agents/install"));
+
+        assert!(is_admin_only_request(&Method::POST, "/agents/install"));
+        assert!(is_admin_only_request(&Method::POST, "/agents/uninstall"));
+        assert!(is_admin_only_request(&Method::POST, "/agents/upgrade-all"));
+        assert!(is_admin_only_request(&Method::POST, "/agents/java-runtime"));
+        assert!(is_admin_only_request(&Method::DELETE, "/agents/download-cache"));
+        assert!(is_admin_only_request(&Method::POST, "/jdbc/drivers"));
+        assert!(is_admin_only_request(&Method::DELETE, "/jdbc/drivers/mysql-8.0"));
+        assert!(is_admin_only_request(&Method::POST, "/jdbc/drivers/maven"));
+    }
+
+    /// 路径级名单对普通用户是"所有方法都拦"，不能被写前缀的只读豁免漏掉。
+    #[test]
+    fn path_level_prefixes_block_every_method() {
+        for method in [Method::GET, Method::POST, Method::DELETE] {
+            assert!(is_admin_only_request(&method, "/mcp"));
+            assert!(is_admin_only_request(&method, "/system/info"));
+            assert!(is_admin_only_request(&method, "/tenants"));
+            assert!(is_admin_only_request(&method, "/plugins/uninstall"));
+        }
+    }
+
+    /// 前缀匹配不能误伤同前缀开头的其他接口。
+    #[test]
+    fn write_prefixes_do_not_over_match() {
+        assert!(!is_admin_only_request(&Method::POST, "/agentsfoo"));
+        assert!(!is_admin_only_request(&Method::POST, "/jdbcx/drivers"));
+        assert!(!is_admin_only_request(&Method::POST, "/connections"));
+        assert!(!is_admin_only_request(&Method::POST, "/query"));
     }
 }

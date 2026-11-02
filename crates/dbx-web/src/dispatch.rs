@@ -9,8 +9,10 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::State;
+use axum::http::header::{self, HeaderValue};
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::routing::any;
 use axum::Router;
 use tower::ServiceExt;
 
@@ -23,17 +25,33 @@ use crate::tenant::{Error, TenantId, TenantRegistry};
 pub struct TenantPayload {
     pub _runtime: crate::runtime::TenantRuntime,
     pub router: Router,
+    /// 只挂在本进程内存里的租户 MCP 路由。外部请求先由 next-tdc 反代用
+    /// `X-API-Key` 鉴权并签 `x-dbx-tenant`，再分发到这里；客户端拿不到
+    /// `mcp_token`，也直接访问不到这个 Router。
+    pub mcp_router: Router,
+    pub mcp_token: String,
 }
 
 pub struct DispatchState {
-    pub registry: TenantRegistry<TenantPayload>,
+    pub registry: Arc<TenantRegistry<TenantPayload>>,
+    pub trust: Arc<crate::identity::TrustConfig>,
+}
+
+/// `/mcp` 的租户分发状态。和 `/api` 共用同一个 `TenantRegistry`，避免同一租户
+/// 被装配两套 `AppState`（SQLite/连接池会互相打架）。
+pub struct McpDispatchState {
+    pub registry: Arc<TenantRegistry<TenantPayload>>,
     pub trust: Arc<crate::identity::TrustConfig>,
 }
 
 async fn build_payload(dir: PathBuf, base_path: String) -> Result<TenantPayload, String> {
     let runtime = crate::runtime::build_tenant(dir, base_path).await?;
     let router = crate::api_router(runtime.state.clone());
-    Ok(TenantPayload { _runtime: runtime, router })
+    // 每个租户一个内部 Bearer，仅用于把已通过身份头认证的请求交给该租户的
+    // MCP Router；客户端无法获得，也不参与外部鉴权。
+    let mcp_token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+    let mcp_router = crate::tenant_mcp_router(&runtime.state, &mcp_token)?;
+    Ok(TenantPayload { _runtime: runtime, router, mcp_router, mcp_token })
 }
 
 pub fn dispatcher_router(state: Arc<DispatchState>) -> Router {
@@ -68,6 +86,52 @@ async fn dispatch(State(state): State<Arc<DispatchState>>, mut req: Request<Body
     }
 }
 
+/// `/mcp` 的租户分发入口。
+///
+/// 与 `/api` 的区别：MCP 客户端只带 `X-API-Key`，由 next-tdc 的 `/dbx` 反代先
+/// 鉴权并签 `x-dbx-tenant`，所以这里同样只验签名头。验完把请求投进该租户的
+/// MCP Router；后者用一次性内部 Bearer 通过 `HttpAuth`，不再暴露给客户端。
+pub fn mcp_dispatcher_router(state: Arc<McpDispatchState>) -> Router {
+    Router::new().route("/mcp", any(mcp_dispatch)).with_state(state)
+}
+
+async fn mcp_dispatch(State(state): State<Arc<McpDispatchState>>, mut req: Request<Body>) -> Response {
+    let identity = match crate::auth::identity_from_headers(&state.trust, req.headers()) {
+        Ok(identity) => identity,
+        Err(error) => return crate::auth::identity_error_response(error),
+    };
+    let tenant_id = match TenantId::parse(identity.effective_tenant()) {
+        Ok(tenant_id) => tenant_id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "租户标识非法").into_response(),
+    };
+    let entry = match state.registry.get_or_create(&tenant_id, build_payload).await {
+        Ok(entry) => entry,
+        Err(error) => return registry_error_response(error),
+    };
+    // 请求期间必须持有 inflight 计数，否则空闲回收可能在 MCP 调用跑到一半时取消租户。
+    let guard = entry.begin();
+    let (router, mcp_token) = {
+        let payload = guard.payload();
+        (payload.mcp_router.clone(), payload.mcp_token.clone())
+    };
+    if identity.is_acting_as() {
+        state.trust.audit_act_as(&identity, req.uri().path());
+    }
+    // 覆盖客户端带来的 Authorization，只让内部 Bearer 通过租户 MCP Router 的
+    // HttpAuth；外部鉴权已经由签名头完成。
+    match HeaderValue::from_str(&format!("Bearer {mcp_token}")) {
+        Ok(value) => {
+            req.headers_mut().insert(header::AUTHORIZATION, value);
+        }
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "MCP 内部凭据无效").into_response(),
+    }
+    req.extensions_mut().insert(identity);
+    match router.oneshot(req).await {
+        Ok(response) => response,
+        Err(infallible) => match infallible {},
+    }
+}
+
 fn registry_error_response(error: Error) -> Response {
     match error {
         Error::Capacity { cap } => {
@@ -85,13 +149,13 @@ fn registry_error_response(error: Error) -> Response {
 /// 定期回收空闲租户。
 ///
 /// 回收前会跳过仍有 inflight 请求的条目，因此在途查询不会被误伤。
-pub fn spawn_tenant_reaper(state: Arc<DispatchState>) {
+pub fn spawn_tenant_reaper(registry: Arc<TenantRegistry<TenantPayload>>) {
     tokio::spawn(async move {
         let period = std::time::Duration::from_secs(60);
         let mut ticker = tokio::time::interval(period);
         loop {
             ticker.tick().await;
-            for tenant_id in state.registry.evict_idle() {
+            for tenant_id in registry.evict_idle() {
                 tracing::info!("回收空闲租户 {}", tenant_id.as_str());
             }
         }
@@ -111,7 +175,12 @@ mod tests {
     /// 所以 root 指向一个不存在的目录也没关系。
     fn state(root: &str) -> Arc<DispatchState> {
         Arc::new(DispatchState {
-            registry: TenantRegistry::new(PathBuf::from(root), String::new(), 4, Duration::from_secs(60)),
+            registry: Arc::new(TenantRegistry::new(
+                PathBuf::from(root),
+                String::new(),
+                4,
+                Duration::from_secs(60),
+            )),
             trust: Arc::new(TrustConfig::for_test(KEY.as_bytes())),
         })
     }

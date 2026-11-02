@@ -8,6 +8,8 @@ name: dbx-web build
 #   linux-arm64  DBX_<ver>_arm64-browser-static.tar.gz   + .tar.gz.sha256
 #   windows-x64  dbx-web_<ver>_x86_64-browser-static.zip + .zip.sha256
 #
+# artifact 只上传包文件；sha256 仍生成并输出到日志，便于核对。
+#
 # Windows 这里用 windows-2022 + 默认 MSVC 目标，产出可直接运行的 zip。
 # release.yml 里的 Windows 包是 Win7 兼容构建（nightly + build-std + 自定义 target），
 # 那套仍留在 release.yml，不在本工作流重复。
@@ -33,6 +35,16 @@ concurrency:
   group: dbx-web-build-${{ github.ref }}
   cancel-in-progress: true
 
+# 手动构建包不追求官方 release 的最终 LTO 优化：full LTO + codegen-units=1
+# 会让每次构建多花约一倍时间。这里保留 thin LTO，并用 sccache 复用依赖编译结果。
+# 官方 release 仍使用根 Cargo.toml 的完整 LTO，不受影响。
+env:
+  CARGO_PROFILE_RELEASE_LTO: "thin"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_IDLE_TIMEOUT: "0"
+
 jobs:
   linux-x64:
     if: contains(fromJSON('["linux-x64","linux-all","all"]'), inputs.platforms)
@@ -53,9 +65,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: pnpm
 
       - name: Install frontend dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
@@ -65,6 +78,11 @@ jobs:
       # 这个 pip 包同时带来 cargo-zigbuild 子命令和它依赖的 zig。
       - name: Install cargo-zigbuild
         run: pip3 install cargo-zigbuild
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -122,8 +140,12 @@ jobs:
           name: DBX-browser-static-${{ env.DBX_ARCH }}
           path: |
             DBX_*_${{ env.DBX_ARCH }}-browser-static.tar.gz
-            DBX_*_${{ env.DBX_ARCH }}-browser-static.tar.gz.sha256
           retention-days: 14
+
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        run: ${SCCACHE_PATH} --show-stats
 
   linux-arm64:
     if: contains(fromJSON('["linux-arm64","linux-all","all"]'), inputs.platforms)
@@ -145,9 +167,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: pnpm
 
       - name: Install frontend dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
@@ -156,6 +179,11 @@ jobs:
 
       - name: Install cargo-zigbuild
         run: pip3 install cargo-zigbuild
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -212,8 +240,12 @@ jobs:
           name: DBX-browser-static-${{ env.DBX_ARCH }}
           path: |
             DBX_*_${{ env.DBX_ARCH }}-browser-static.tar.gz
-            DBX_*_${{ env.DBX_ARCH }}-browser-static.tar.gz.sha256
           retention-days: 14
+
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        run: ${SCCACHE_PATH} --show-stats
 
   windows-x64:
     if: contains(fromJSON('["windows-x64","all"]'), inputs.platforms)
@@ -229,12 +261,18 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: pnpm
 
       - name: Install frontend dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -290,5 +328,10 @@ jobs:
           name: dbx-web-browser-static-x86_64
           path: |
             dbx-web_*_x86_64-browser-static.zip
-            dbx-web_*_x86_64-browser-static.zip.sha256
           retention-days: 14
+
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: '& $env:SCCACHE_PATH --show-stats'

@@ -1308,7 +1308,6 @@ export interface ToolbarItems {
   history: boolean;
   ai: boolean;
   theme: boolean;
-  github: boolean;
   /** Always-on-top window control. Off by default: the toolbar's right side is
    *  the most crowded strip in the app and keeping a window above every other
    *  application is not a day-to-day action, so the button is opt-in. */
@@ -1330,7 +1329,6 @@ export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   history: true,
   ai: true,
   theme: true,
-  github: true,
   alwaysOnTop: false,
   exclusiveRightSidebarPanels: true,
 };
@@ -2010,7 +2008,6 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
     history: items.history ?? defaults.history,
     ai: items.ai ?? defaults.ai,
     theme: items.theme ?? defaults.theme,
-    github: items.github ?? defaults.github,
     // Unlike the entries above, a newly added toolbar button stays hidden until
     // the user asks for it, so upgrading never adds another control to the
     // crowded right side of the toolbar.

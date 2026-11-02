@@ -46,6 +46,9 @@ struct RuntimeState {
 pub struct WebMcpHttpStatus {
     pub enabled: bool,
     pub endpoint_path: String,
+    /// 受信任反代（next-tdc）模式下，`/mcp` 按 API Key 签发的租户身份分发，
+    /// 不再使用本进程的 Web MCP Token。前端据此切换到“多租户 API Key”视图。
+    pub tenant_mode: bool,
     pub token_source: Option<&'static str>,
     pub allowed_hosts: Vec<String>,
     pub allowed_origins: Vec<String>,
@@ -155,12 +158,18 @@ impl WebMcpRuntime {
         self.state.read().unwrap_or_else(|error| error.into_inner()).settings.allowed_hosts.clone()
     }
 
-    pub fn status(&self, endpoint_path: String, management_available: bool) -> WebMcpHttpStatus {
+    pub fn status(
+        &self,
+        endpoint_path: String,
+        management_available: bool,
+        tenant_mode: bool,
+    ) -> WebMcpHttpStatus {
         let state = self.state.read().unwrap_or_else(|error| error.into_inner());
         let managed = state.source == TokenSource::Managed;
         WebMcpHttpStatus {
             enabled: state.settings.enabled && state.token.is_some(),
             endpoint_path,
+            tenant_mode,
             token_source: state.source.as_str(),
             allowed_hosts: state.settings.allowed_hosts.clone(),
             allowed_origins: state.settings.allowed_origins.clone(),

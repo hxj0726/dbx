@@ -30,7 +30,7 @@ describe("MCP transport header", () => {
     document.body.append(root);
     const app = createApp({
       components: { Tabs, TabsContent, TabsList, TabsTrigger, Button, History },
-      setup: () => ({ mcpTransportTab, requestMcpCallHistory, t: (key: string) => settings[key.replace("settings.", "")] }),
+      setup: () => ({ mcpTransportTab, requestMcpCallHistory, showLocalStdioMcp: true, t: (key: string) => settings[key.replace("settings.", "")] }),
       render: compile(template),
     });
     app.mount(root);

@@ -55,6 +55,10 @@ pub async fn build_tenant(data_dir: PathBuf, public_base_path: String) -> Result
         return Err(format!("Failed to create data directory {}: {error}", data_dir.display()));
     }
 
+    // 驱动目录（Agent 包、托管 JRE）默认跟着租户目录一起隔离；`DBX_AGENT_DIR`
+    // 可以把它提到进程级共享位置，供多个租户只读复用同一份驱动。
+    let agent_dir = web_agent_dir(&data_dir);
+
     let app_state = {
         let db_path = data_dir.join("dbx.db");
         let storage = match Storage::open_unmigrated(&db_path).await {
@@ -86,7 +90,7 @@ pub async fn build_tenant(data_dir: PathBuf, public_base_path: String) -> Result
         Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
             storage,
             data_dir.join("plugins"),
-            web_agent_dir(&data_dir),
+            agent_dir.clone(),
             env!("CARGO_PKG_VERSION"),
         ))
     };
@@ -132,10 +136,38 @@ pub async fn build_tenant(data_dir: PathBuf, public_base_path: String) -> Result
         Err(error) => return Err(format!("invalid trust proxy configuration: {error}")),
     };
 
+    // 驱动管理是多租户下的管理面（普通用户只读）。如果没把目录提到共享位置，
+    // 管理员装的驱动只落在自己的租户目录里，普通用户永远提示"驱动未安装"——
+    // 这个故障很隐蔽，所以在启动时就喊出来。
+    log::info!("租户驱动目录: {}", agent_dir.display());
+    if trust.is_some() && std::env::var_os("DBX_AGENT_DIR").is_none() {
+        log::warn!(
+            "受信代理模式下未设置 DBX_AGENT_DIR，驱动目录 {} 按租户隔离：管理员安装的驱动不会共享给普通用户",
+            agent_dir.display()
+        );
+    }
+    if trust.is_some() && std::env::var_os("DBX_AGENT_DIR").is_some() {
+        // 共享目录是只读复用语义：成员连接失败时不能自动下载驱动/JRE，
+        // 否则会绕过 /agents 的管理员门禁写入进程级目录。
+        app_state.set_implicit_agent_install_enabled(false);
+        log::info!("受信代理模式使用共享驱动目录：已禁用成员连接的隐式驱动安装，只复用管理员预装驱动");
+    }
+
+    // `DBX_DOCS_NOTES_ROOTS` 是进程级允许根；多租户下会变成跨租户写入口。
+    // 受信模式只允许每个租户自己的 `<data_dir>/docs-notes`，共享根直接忽略。
+    let notes_roots = if trust.is_some() {
+        if std::env::var_os("DBX_DOCS_NOTES_ROOTS").is_some() {
+            log::warn!("受信代理模式忽略 DBX_DOCS_NOTES_ROOTS：notes 只能落在各租户 data_dir/docs-notes 下");
+        }
+        Vec::new()
+    } else {
+        routes::docs::notes_roots_from_env(std::env::var_os("DBX_DOCS_NOTES_ROOTS").as_deref())
+    };
+
     let web_state = Arc::new(WebState {
         app: app_state,
         data_dir,
-        notes_roots: routes::docs::notes_roots_from_env(std::env::var_os("DBX_DOCS_NOTES_ROOTS").as_deref()),
+        notes_roots,
         public_base_path,
         demo_mode,
         password_disabled,
@@ -160,11 +192,10 @@ pub async fn build_tenant(data_dir: PathBuf, public_base_path: String) -> Result
     routes::sql_file::start_sql_file_cleanup(&web_state);
     routes::connection::start_connection_idle_sweeper(&web_state);
 
-    // `DBX_BACKUP_ROOT` 未设置时回落到 `<data_dir>/backups`。这里必须在
-    // `service()` 之前把目录建出来：`service()` 会对同一个路径做
-    // `canonicalize()`，目录不存在时直接失败，而不是等到上传时才暴露。
-    let backup_root =
-        std::env::var_os("DBX_BACKUP_ROOT").map(PathBuf::from).unwrap_or_else(|| web_state.data_dir.join("backups"));
+    // `DBX_BACKUP_ROOT` 未设置时回落到 `<data_dir>/backups`；受信多租户下配置了
+    // 共享根时再按租户目录分一层。这里必须在 `service()` 之前把目录建出来：
+    // `service()` 会对同一个路径做 `canonicalize()`，目录不存在时直接失败。
+    let backup_root = routes::scheduled_backup::backup_root(&web_state);
     if let Err(error) = std::fs::create_dir_all(&backup_root) {
         return Err(format!("Failed to create server backup root {}: {error}", backup_root.display()));
     }

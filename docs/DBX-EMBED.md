@@ -20,7 +20,6 @@ dbx-web 仍是**独立进程**，但不再是"独立部署的服务"：
 ```bash
 DBX_TRUST_PROXY=1
 DBX_TRUST_KEY=<>=32 字节，与 next-tdc 同值>
-DBX_PUBLIC_BASE_PATH=/dbx/     # 挂在 next-tdc 的 /dbx 子路径
 DBX_BIND_ADDR=127.0.0.1
 DBX_DATA_DIR=/var/lib/dbx      # 租户目录在其下的 tenants/
 DBX_TENANT_CAP=64              # 同时驻留租户上限
@@ -29,14 +28,19 @@ DBX_TENANT_IDLE_SECS=1800      # 空闲驱逐阈值
 
 `DBX_TRUST_PROXY=1` 与 `DBX_PASSWORD` **互斥**，同时设置会启动失败（避免出现"既是单密码又是多租户"的半开状态）。
 
+本部署的 `DBX_PUBLIC_BASE_PATH` **不要设**：next-tdc 的 Route Handler 会先把 `/dbx` 前缀剥掉再转发（见 §6），
+dbx-web 始终按根路径服务。只有反代**保留**前缀（例如 nginx `proxy_pass .../dbx/`）时才设 `/dbx/`，
+两种反代风格只能二选一，混用会出现双重前缀或 404。
+
 ## 2. 三层结构
 
 ```
 浏览器 ──/dbx/*──> next-tdc 代理 ──x-dbx-* 签名头──> dbx-web (127.0.0.1:4224)
-                    (HTTP/SSE/WS 全透传)              DBX_PUBLIC_BASE_PATH=/dbx/
+                    (HTTP/SSE/WS 全透传，剥掉 /dbx 前缀)
 ```
 
 - **网络层**：`/dbx` 整体转发，必须支持 WebSocket Upgrade。
+- **路径层**：代理剥掉 `/dbx`，dbx-web 按根路径服务；因此不要设 `DBX_PUBLIC_BASE_PATH`（见 §6、§10.1）。
 - **身份层**：代理为每个请求签名；浏览器不直连 dbx-web，也拿不到任何 dbx cookie。
 - **展示层**：Next 页面里一个 iframe。
 
@@ -117,9 +121,13 @@ iframe → 父：
 
 ### nginx
 
+以下 nginx 示例**保留** `/dbx` 前缀（`proxy_pass .../dbx/`），因此需要
+`DBX_PUBLIC_BASE_PATH=/dbx/`。next-tdc 的 Route Handler 走的是**剥前缀**写法
+（先去掉 `/dbx` 再转发），那种部署**不要设** `DBX_PUBLIC_BASE_PATH`。两者不能混用。
+
 ```nginx
 location /dbx/ {
-    proxy_pass http://127.0.0.1:4224/dbx/;
+    proxy_pass http://127.0.0.1:4224/dbx/;   # 保留 /dbx 前缀（需设 DBX_PUBLIC_BASE_PATH=/dbx/）
     proxy_http_version 1.1;
 
     # WebSocket（redis pub/sub、插件 WS）
@@ -200,7 +208,7 @@ dbx-web 侧（两侧 `DBX_TRUST_KEY` 必须一致）：
 | `DBX_DATA_DIR` | 是 | 租户数据根目录 |
 | `DBX_TENANT_CAP` | 否 | 驻留租户上限，默认 64 |
 | `DBX_TENANT_IDLE_SECS` | 否 | 空闲回收秒数，默认 1800 |
-| `DBX_PUBLIC_BASE_PATH` | **不要设** | 前缀由反代剥离；设了会变成双重前缀 |
+| `DBX_PUBLIC_BASE_PATH` | 视反代 | 反代**保留** `/dbx` 前缀时设 `/dbx/`；反代**剥掉** `/dbx`（next-tdc Route Handler）时**不要设**。混用会出现双重前缀或 404 |
 
 next-tdc 侧：
 
@@ -213,7 +221,7 @@ next-tdc 侧：
 
 ```
 $DBX_DATA_DIR/
-  dbx.db            # 根租户：仅供 /mcp 等进程级能力
+  dbx.db            # 单租户根状态；trust 模式下 /mcp 不再使用它
   tenants/
     u-<uuid>/       # 每个用户一份
       dbx.db
@@ -245,5 +253,179 @@ $DBX_DATA_DIR/
 ### 10.6 尚未覆盖
 
 - **WebSocket**：需 nginx 或独立 Node 进程转发 Upgrade（见第 9 节第 1 条）。
-- **`/mcp` 仍是进程级**：它挂在根状态上，所以对 member 关闭入口；要每用户 MCP 需另行设计。
+- **`/mcp` 在可信代理模式下已按租户分发**：`/api` 与 `/mcp` 共用同一个
+  `TenantRegistry`，每个租户一套 MCP Router（独立 session、策略、历史）；外部鉴权由
+  next-tdc 的 `/dbx` 反代完成。单租户模式仍把 `/mcp` 挂在根状态上。面向 AI 客户端的
+  实际接入方式见第 11 节。
 - **租户删除**：`TenantRegistry::remove` 已实现但尚无调用方，删除用户后其租户目录需人工清理。
+
+## 11. MCP 接入（AI 客户端）
+
+有两条正式入口，按“要不要 DBX 原生工具”选：
+
+- **TDC 网关**（`http://<TDC_HOST>:8000/mcp`）：暴露 TDC 工具集，权限/审计按 TDC 用户。
+- **官方 DBX MCP**（`http://<TDC_HOST>:3000/dbx/mcp`）：暴露 DBX 原生 `dbx_*` 工具；
+  由 next-tdc 的 `/dbx` 反代用 `X-API-Key` 鉴权并签 `x-dbx-tenant`，DBX `/mcp` 按租户分发。
+  这是本次改造后的多租户模式，不需要 `DBX_WEB_MCP_TOKEN`。
+
+| 候选 | 判定 | 说明 |
+|---|---|---|
+| `http://<TDC_HOST>:3000/dbx/mcp` | ✅ 官方 DBX MCP / 多租户 | next-tdc 反代鉴权 + DBX 按签名头分发；DBX 原生工具；客户端只带 `X-API-Key` |
+| `http://<TDC_HOST>:8000/mcp` | ✅ TDC 工具网关 | TDC 工具集，SQL/查询类工具经 dbx 执行；只覆盖 TDC 已登记数据源 |
+| `http://<TDC_HOST>:3000/mcp` | ❌ | next-tdc 控制台页面（创建令牌、查看示例），不是 MCP 端点 |
+| `http://<TDC_HOST>:3000/dbx` | ❌ | DBX Web 页面/API 基地址，不是 MCP 端点 |
+| `http://127.0.0.1:4224/mcp` | ⚠️ | 仅本机；单租户模式需 `DBX_WEB_MCP_TOKEN`；可信代理模式下没有 `x-dbx-*` 会 401，且不按租户分发 |
+
+### 11.1 官方 DBX MCP（多租户，需要原生工具时）
+
+调用链：
+
+```
+AI 客户端
+  POST http://<TDC_HOST>:3000/dbx/mcp
+  X-API-Key: tdc_...
+        │
+        ▼
+next-tdc /dbx 反代
+  requireUser() 校验 API Key
+  签 x-dbx-tenant = user.uuid
+  x-dbx-role / x-dbx-ts / x-dbx-nonce / x-dbx-sig
+        │
+        ▼
+dbx-web /mcp（可信代理模式）
+  验签 → TenantId = user.uuid
+  TenantRegistry 取/建 tenants/<uuid>
+  投进该租户的 MCP Router
+        │
+        ▼
+该租户的 dbx.db
+  connections / MCP policy / history / sessions
+```
+
+客户端配置（也可直接使用 `examples/mcp/tdc-native-mcp.json`）：
+
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "type": "http",
+      "url": "http://<TDC_HOST>:3000/dbx/mcp",
+      "headers": { "X-API-Key": "tdc_..." }
+    }
+  }
+}
+```
+
+DBX 控制台的「MCP 设置 → 接入方式 → HTTP 服务」在可信代理模式下会自动切成
+「官方 DBX MCP（多租户）」卡片：显示 `/dbx/mcp` 端点、`X-API-Key` 请求头和
+TDC 令牌页面入口，不再显示旧的单租户 Web MCP Token。Web 控制台只保留 HTTP
+接入，不再提供本地 stdio；桌面端仍保留本地 stdio。
+
+Claude Code：
+
+```bash
+claude mcp add --transport http dbx \
+  http://<TDC_HOST>:3000/dbx/mcp \
+  --header "X-API-Key: tdc_..."
+```
+
+前置条件：
+
+- dbx-web 已按第 10 节开启 `DBX_TRUST_PROXY=1` + `DBX_TRUST_KEY`；
+- next-tdc 已配置同一个 `DBX_TRUST_KEY`，且 `DBX_WEB_URL` 指向 dbx-web；
+- **不要设** `DBX_PUBLIC_BASE_PATH`（next-tdc 会剥掉 `/dbx` 前缀）；
+- 不需要设置 `DBX_WEB_MCP_TOKEN`；可信代理模式下 `/mcp` 走租户分发，根 token 不参与；
+- **不要设置** `DBX_MCP_SCOPE_CONNECTION_IDS` / `_CONNECTION_ID` 等进程级 scope：
+  它们会套到所有租户上，多租户模式应让每个用户用自己的连接；
+- 浏览器类 MCP 客户端如果发 `Origin`，在 dbx-web 侧配置
+  `DBX_WEB_MCP_ALLOWED_ORIGINS=http://<TDC_HOST>:3000`；CLI 客户端通常不发 Origin；
+- next-tdc 对普通请求默认 30s 超时，MCP 的长查询/长工具调用需要调大
+  `DBX_REQUEST_TIMEOUT`（例如 `600000`），或把 `/mcp` 加进 `/dbx` 反代的
+  `LONG_RUNNING_PREFIXES`。否则大查询会在反代层 504。
+
+验证：
+
+```bash
+curl -sS http://<TDC_HOST>:3000/dbx/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'X-API-Key: tdc_...' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'
+```
+
+不带 `X-API-Key` 应返回 401；带无效令牌也是 401；带有效令牌应返回 `result`。
+用该用户的令牌调 `dbx_list_connections`，只应看到该用户租户下的连接。
+
+注意：
+
+- TDC 令牌按用户签发；`tenant = user.uuid`，一个用户一个 DBX 租户。
+  不是“一个组织一个租户”，也不是“多个用户共享一个租户”。
+- 同一个用户的多个 API Key 权限相同；令牌没有 per-key scope。吊销令牌后，该 Key
+  立即失效；其他 Key 不受影响。
+- 直连 `http://<DBX_HOST>:4224/mcp` 不接受 TDC API Key：可信代理模式下它只认
+  `x-dbx-*` 签名头，没有就走 401。要直连必须再加一层“API Key → 用户/租户”的
+  DBX 侧校验器，当前未实现。
+
+### 11.2 TDC 网关（只需要 TDC 工具时）
+
+```json
+{
+  "mcpServers": {
+    "tdc": {
+      "type": "http",
+      "url": "http://<TDC_HOST>:8000/mcp",
+      "headers": { "X-API-Key": "tdc_..." }
+    }
+  }
+}
+```
+
+令牌创建：登录 next-tdc → 侧栏「MCP 服务」（`/mcp`）→ 创建令牌。明文只显示一次；
+权限、审计、可用工具都按令牌所属用户判定。
+
+网关暴露的是 **TDC 工具集**（工具清单以控制台「MCP 服务」页为准；其中的 SQL/查询类工具经 dbx 执行），
+只覆盖 next-tdc 已登记的数据源。直接在 dbx 界面里创建、next-tdc 没有登记过的连接，网关看不到。
+
+### 11.3 stdio 旁路（本机 / 兼容旧客户端）
+
+如果客户端只支持 stdio，或网络策略不允许直接访问 HTTP MCP，可以让本地
+`dbx-mcp-server` 以 stdio 方式连到 next-tdc 的 `/dbx` 代理，并把 TDC 令牌放进
+`DBX_WEB_HEADERS`。这条路径仍然能拿到 DBX 原生工具，但多一层本地进程：
+
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "dbx-mcp-server",
+      "env": {
+        "DBX_WEB_URL": "http://<TDC_HOST>:3000/dbx",
+        "DBX_WEB_HEADERS": "{\"X-API-Key\":\"tdc_...\"}"
+      }
+    }
+  }
+}
+```
+
+注意：
+
+- **不要设** `DBX_WEB_PASSWORD`：本部署没有 dbx-web 登录口令，设置后只会让客户端等待一个
+  不存在的登录接口。
+- `/dbx` 代理的 `requireUser()` 接受 `X-API-Key` 后，会用该用户身份签发 `x-dbx-*` 头，
+  所以 MCP 看到的是该令牌所属用户的租户数据。
+- 这是**非文档化旁路**，不是 next-tdc 的正式契约；后续若收紧 `/dbx` 的令牌访问会失效。
+- next-tdc 对非长耗时接口默认 30s 超时（`DBX_REQUEST_TIMEOUT`），大查询可能返回 504。
+
+### 11.4 TDC 网关验证
+
+带令牌向网关发一次 MCP `initialize`，能返回 `result` 即 URL 与令牌都正确：
+
+```bash
+curl -sS http://<TDC_HOST>:8000/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'X-API-Key: tdc_...' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'
+```
+
+未带令牌时网关返回的是 HTTP 200 + JSON-RPC 错误（不是 HTTP 401），看到 `error` 即说明
+URL 通、只是缺令牌。

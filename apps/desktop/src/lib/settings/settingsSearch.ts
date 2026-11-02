@@ -19,6 +19,8 @@ export function resolveSettingsCategory(initialTab?: string): SettingsCategory {
 
 export interface SettingsSearchContext {
   isWeb: boolean;
+  /** 受信多租户 Web 下用于过滤管理面条目；缺省按管理员处理，兼容桌面调用。 */
+  isAdmin?: boolean;
   hasSqlServerConnection?: boolean;
   sqlServerSpaceConfirmsCompletionEnabled?: boolean;
   visibleCategories: ReadonlySet<SettingsCategory>;
@@ -65,7 +67,7 @@ export interface SettingsSearchRoute {
 
 export type Translate = (key: string) => string;
 
-type ToolbarVisibilityItemKey = "immediateSync" | "dataTransfer" | "driverManager" | "pluginCenter" | "sqlFile" | "schemaDiff" | "dataCompare" | "checkUpdates" | "sqlLibrary" | "sqlFileTree" | "history" | "ai" | "theme" | "github" | "alwaysOnTop";
+type ToolbarVisibilityItemKey = "immediateSync" | "dataTransfer" | "driverManager" | "pluginCenter" | "sqlFile" | "schemaDiff" | "dataCompare" | "checkUpdates" | "sqlLibrary" | "sqlFileTree" | "history" | "ai" | "theme" | "alwaysOnTop";
 
 export type ToolbarVisibilityItem = ({ key: ToolbarVisibilityItemKey; titleKey: string; title?: never } | { key: ToolbarVisibilityItemKey; title: string; titleKey?: never }) & {
   /** The matching toolbar button can only exist in the desktop app, so the Web build hides the switch. */
@@ -90,7 +92,6 @@ export const TOOLBAR_VISIBILITY_ITEMS: readonly ToolbarVisibilityItem[] = [
   { key: "history", titleKey: "history.title" },
   { key: "ai", title: "AI" },
   { key: "theme", titleKey: "toolbar.theme" },
-  { key: "github", title: "GitHub" },
   { key: "alwaysOnTop", titleKey: "toolbar.alwaysOnTop", desktopOnly: true },
   { key: "immediateSync", titleKey: "toolbar.immediateSync" },
 ];
@@ -116,6 +117,8 @@ export function createToolbarVisibilitySettingsSearchDefinitions(items: readonly
 
 const desktopOnly = (context: SettingsSearchContext) => !context.isWeb;
 const webOnly = (context: SettingsSearchContext) => context.isWeb;
+/** isAdmin 缺省（桌面版等不传角色的调用）按管理员处理，保持改造前的搜索结果不变。 */
+const adminOnly = (context: SettingsSearchContext) => context.isAdmin !== false;
 const sqlServerSpaceCompletionVisible = (context: SettingsSearchContext) => context.hasSqlServerConnection === true || context.sqlServerSpaceConfirmsCompletionEnabled === true;
 
 export interface ShortcutSearchDefinitionSource {
@@ -708,7 +711,17 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "ai-custom-skill-root", category: "ai", titleKey: "settings.aiSkillRoot", descriptionKey: "settings.aiSkillRootDesc", targetId: "ai", visible: desktopOnly },
   { id: "ai-skill-auto-enabled", category: "ai", titleKey: "settings.aiSkillAutoEnabled", descriptionKey: "settings.aiSkillAutoEnabledDesc", targetId: "ai", visible: desktopOnly },
   { id: "mcp", category: "mcp", titleKey: "settings.mcpTitle", descriptionKey: "settings.mcpDescription", targetId: "mcp" },
-  { id: "mcp-bin-path", category: "mcp", titleKey: "settings.mcpBinPath", targetId: "mcp-stdio", route: { mcpManagementTab: "access", mcpTransportTab: "stdio" } },
+  {
+    id: "mcp-tenant-api-key",
+    category: "mcp",
+    titleKey: "settings.mcpTenantApiKeyTitle",
+    descriptionKey: "settings.mcpTenantApiKeyDescription",
+    targetId: "mcp-http",
+    route: { mcpManagementTab: "access", mcpTransportTab: "http" },
+    keywordKeys: ["settings.mcpTenantApiKeyEndpointLabel", "settings.mcpTenantApiKeyHeaderLabel", "settings.mcpTenantApiKeyClientConfigLabel"],
+    visible: webOnly,
+  },
+  { id: "mcp-bin-path", category: "mcp", titleKey: "settings.mcpBinPath", targetId: "mcp-stdio", route: { mcpManagementTab: "access", mcpTransportTab: "stdio" }, visible: desktopOnly },
   {
     id: "mcp-permissions",
     category: "mcp",
@@ -718,16 +731,18 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     route: { mcpManagementTab: "permissions" },
     keywordKeys: MCP_EXECUTION_MODE_COLUMNS.map((mode) => mode.labelKey),
   },
-  { id: "mcp-config", category: "mcp", titleKey: "settings.mcpConfig", targetId: "mcp-client-config", route: { mcpManagementTab: "access", mcpTransportTab: "stdio" } },
+  { id: "mcp-config", category: "mcp", titleKey: "settings.mcpConfig", targetId: "mcp-client-config", route: { mcpManagementTab: "access", mcpTransportTab: "stdio" }, visible: desktopOnly },
   { id: "security", category: "security", titleKey: "settings.securityTab", targetId: "security", visible: webOnly },
   { id: "security-password", category: "security", titleKey: "auth.changePassword", targetId: "security", visible: webOnly, keywordKeys: ["auth.changePasswordDescription", "auth.oldPassword", "auth.newPassword", "auth.confirmPassword"] },
   { id: "about-support", category: "about", titleKey: "settings.supportInfoTitle", descriptionKey: "settings.supportInfoDescription", targetId: "about" },
   { id: "about-transfer", category: "about", titleKey: "settings.settingsTransferTitle", descriptionKey: "settings.settingsTransferDescription", targetId: "about" },
+  { id: "about-open-source-license", category: "about", titleKey: "settings.openSourceLicenseTitle", descriptionKey: "settings.openSourceLicenseDescription", targetId: "about" },
   { id: "updates-app", category: "updates", titleKey: "settings.autoUpdateApp", descriptionKey: "settings.autoUpdateAppDescription", targetId: "updates", keywordKeys: ["settings.autoUpdate"] },
-  { id: "updates-drivers", category: "updates", titleKey: "settings.autoUpdateDrivers", descriptionKey: "settings.autoUpdateDriversDescription", targetId: "updates" },
-  { id: "updates-jdbc", category: "updates", titleKey: "settings.autoUpdateJdbc", descriptionKey: "settings.autoUpdateJdbcDescription", targetId: "updates" },
-  { id: "updates-mcp", category: "updates", titleKey: "settings.autoUpdateMcp", descriptionKey: "settings.autoUpdateMcpDescription", targetId: "updates" },
-  { id: "updates-plugins", category: "updates", titleKey: "settings.autoUpdatePlugins", descriptionKey: "settings.autoUpdatePluginsDescription", targetId: "updates" },
+  // 驱动/JDBC/MCP/插件的更新开关会改进程级共享安装状态，普通用户的搜索结果里不应出现入口。
+  { id: "updates-drivers", category: "updates", titleKey: "settings.autoUpdateDrivers", descriptionKey: "settings.autoUpdateDriversDescription", targetId: "updates", visible: adminOnly },
+  { id: "updates-jdbc", category: "updates", titleKey: "settings.autoUpdateJdbc", descriptionKey: "settings.autoUpdateJdbcDescription", targetId: "updates", visible: adminOnly },
+  { id: "updates-mcp", category: "updates", titleKey: "settings.autoUpdateMcp", descriptionKey: "settings.autoUpdateMcpDescription", targetId: "updates", visible: adminOnly },
+  { id: "updates-plugins", category: "updates", titleKey: "settings.autoUpdatePlugins", descriptionKey: "settings.autoUpdatePluginsDescription", targetId: "updates", visible: adminOnly },
   { id: "updates-source", category: "updates", titleKey: "settings.updateDownloadSource", descriptionKey: "settings.updateDownloadSourceDescription", targetId: "updates", keywordKeys: ["settings.updateDownloadSourceOfficial", "settings.updateDownloadSourceCnb"] },
   // Fixed controls added alongside the full template coverage audit.
   { id: "editor-keep-explicit-transaction-in-auto-commit", category: "editor", titleKey: "settings.keepExplicitTransactionInAutoCommit", descriptionKey: "settings.keepExplicitTransactionInAutoCommitDescription", targetId: "editor" },

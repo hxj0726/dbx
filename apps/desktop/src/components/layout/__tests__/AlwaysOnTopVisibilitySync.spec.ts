@@ -134,7 +134,7 @@ describe("always-on-top toolbar visibility across windows", () => {
     await main.initEditorSettings();
     const first = await mountDetached("detached-tab-first");
     first.store.editorSettings.fontSize = 27;
-    first.store.editorSettings.toolbarItems.github = false;
+    first.store.editorSettings.toolbarItems.theme = false;
     expect(first.store).not.toBe(main);
     expect(pinButton(first.host)).toBeNull();
 
@@ -152,7 +152,7 @@ describe("always-on-top toolbar visibility across windows", () => {
       expect(pinButton(second.host)).toBeNull();
     });
     expect(first.store.editorSettings.fontSize).toBe(27);
-    expect(first.store.editorSettings.toolbarItems.github).toBe(false);
+    expect(first.store.editorSettings.toolbarItems.theme).toBe(false);
     expect(first.state.alwaysOnTop).toBe(false);
     expect(second.state.alwaysOnTop).toBe(false);
     expect(vi.mocked(emit).mock.calls).toEqual([

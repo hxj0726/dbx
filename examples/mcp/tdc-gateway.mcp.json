@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "tdc": {
+      "type": "http",
+      "url": "http://<TDC_HOST>:8000/mcp",
+      "headers": { "X-API-Key": "<tdc_api_token>" }
+    }
+  }
+}
